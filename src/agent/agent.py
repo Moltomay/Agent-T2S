@@ -1,8 +1,7 @@
 import uuid
-import json
 import os
 
-from src.agent.text2sql import query_database
+from src.agent.text2sql import process_question
 from src.agent.llm_client import chat
 from src.memory.short_term import ShortTermMemory
 from src.memory.long_term import LongTermMemory
@@ -11,22 +10,24 @@ from src.memory.long_term import LongTermMemory
 SESSION_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".session_id")
 
 
+MEMORY_PATTERNS = [
+    "what was my last",
+    "what did i just",
+    "what have we talked",
+    "what did we discuss",
+    "what was the previous",
+    "what was our",
+    "do you remember",
+    "what did i say",
+    "what was my previous",
+    "recall my",
+    "what is my",
+]
+
+
 def _is_memory_question(question: str) -> bool:
     q = question.lower().strip()
-    memory_patterns = [
-        "what was my last",
-        "what did i just",
-        "what have we talked",
-        "what did we discuss",
-        "what was the previous",
-        "what was our",
-        "do you remember",
-        "what did i say",
-        "what was my previous",
-        "recall my",
-        "what is my",
-    ]
-    return any(p in q for p in memory_patterns)
+    return any(p in q for p in MEMORY_PATTERNS)
 
 
 def _load_session_id() -> str:
@@ -45,27 +46,6 @@ def _load_session_id() -> str:
     except Exception:
         pass
     return sid
-
-
-def _format_answer(question: str, result: dict) -> str:
-    if not result["success"]:
-        return (
-            f"Error querying database:\n"
-            f"SQL: `{result['sql']}`\n"
-            f"Error: {result['error']}"
-        )
-
-    sql = result["sql"]
-    rows = result["results"]
-    count = result["row_count"]
-
-    if count == 0:
-        return f"No results.\nSQL: `{sql}`"
-
-    header = f"**Query:** `{sql}`\n**Rows:** {count}\n"
-    data = json.dumps(rows[:10], indent=2, default=str)
-    truncated = "\n... (truncated)" if len(rows) > 10 else ""
-    return header + data + truncated
 
 
 class DatabaseAgent:
@@ -96,26 +76,31 @@ class DatabaseAgent:
         if not history_text:
             return "We haven't had any conversation yet."
 
-        prompt = (
-            f"The user asks: '{question}'\n\n"
-            f"Answer based on this conversation history:\n{history_text}\n\n"
-            "Give a direct, concise answer."
-        )
         return chat([
-            {"role": "system", "content": "You are a helpful assistant with access to the conversation history."},
-            {"role": "user", "content": prompt},
+            {
+                "role": "system",
+                "content": "You have access to the conversation history. Answer directly.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Conversation history:\n{history_text}"
+                ),
+            },
         ])
 
     def _answer_from_database(self, question: str) -> str:
         conv_history = self.short_term.get_conversation_summary()
         long_context = self.long_term.get_summary_context(self.session_id)
 
-        result = query_database(
+        result = process_question(
             question,
             long_term_context=long_context,
             conversation_history=conv_history,
         )
-        return _format_answer(question, result)
+
+        return result["answer"]
 
     def _store_summary(self, question: str, answer: str):
         summary = chat([

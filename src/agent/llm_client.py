@@ -2,7 +2,7 @@ import os
 import time
 import re as _re
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, NotFoundError
 
 load_dotenv()
 
@@ -16,12 +16,15 @@ FREE_FALLBACK_MODELS = [
     "google/gemma-4-31b-it:free",
     "meta-llama/llama-3.2-3b-instruct:free",
     "nousresearch/hermes-3-llama-3.1-405b:free",
-    "qwen/qwen-2.5-72b-instruct:free",
 ]
 
 
 def get_client() -> OpenAI:
-    return OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    return OpenAI(
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL,
+        timeout=60,
+    )
 
 
 def chat(messages: list[dict], model: str | None = None) -> str:
@@ -45,11 +48,12 @@ def chat(messages: list[dict], model: str | None = None) -> str:
                 last_error = e
                 meta = str(e)
                 match = _re.search(r"retry_after_seconds[\"':]+\s*(\d+)", meta)
-                if match and int(match.group(1)) < 30:
-                    time.sleep(int(match.group(1)) + 1)
-                    continue
+                wait = int(match.group(1)) + 1 if (match and int(match.group(1)) < 30) else 5
+                time.sleep(wait)
+                continue
+            except NotFoundError:
                 break
             except Exception:
                 raise
 
-    raise last_error or Exception("All models rate-limited")
+    raise last_error or Exception("All models unavailable")

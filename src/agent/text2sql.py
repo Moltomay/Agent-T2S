@@ -1,4 +1,5 @@
 import re
+import json
 
 from src.agent.llm_client import chat
 from src.db.connection import get_table_schema, execute_sql
@@ -18,6 +19,8 @@ Rules:
 - Only use SELECT statements
 - Never modify or delete data"""
 
+RESPONSE_SYSTEM_PROMPT = """Given results from a database query, answer the user's question in 1-2 clear sentences. Do not mention SQL or queries — just answer naturally. If the result is empty, say so."""
+
 
 def generate_sql(
     question: str,
@@ -32,8 +35,7 @@ def generate_sql(
         messages.append({
             "role": "system",
             "content": (
-                "This is a conversation. Use the history below to resolve "
-                "pronouns and follow-up references in the user's question.\n"
+                "Recent conversation (use to resolve pronouns/follow-ups):\n"
                 f"{conversation_history}"
             ),
         })
@@ -55,7 +57,26 @@ def generate_sql(
     return sql
 
 
-def query_database(
+def format_response(question: str, sql: str, results: list, row_count: int) -> str:
+    if row_count == 0:
+        return f"No results found.\n\n---\n*SQL query used:* `{sql}`"
+
+    preview = json.dumps(results[:10], indent=2, default=str)
+    if len(results) > 10:
+        preview += "\n..."
+
+    answer = chat([
+        {"role": "system", "content": RESPONSE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": f"Question: {question}\nResults ({row_count} rows):\n{preview}",
+        },
+    ])
+
+    return f"{answer}\n\n---\n*SQL query used:* `{sql}`"
+
+
+def process_question(
     question: str,
     long_term_context: str = "",
     conversation_history: str = "",
@@ -65,20 +86,22 @@ def query_database(
         long_term_context=long_term_context,
         conversation_history=conversation_history,
     )
+
+    if not sql:
+        return {
+            "success": False,
+            "sql": "",
+            "answer": "Could not generate a valid SQL query.",
+        }
+
     try:
         results = execute_sql(sql)
         row_count = len(results)
-        return {
-            "sql": sql,
-            "success": True,
-            "results": results[:50],
-            "truncated": row_count > 50,
-            "row_count": row_count,
-        }
+        answer = format_response(question, sql, results, row_count)
+        return {"success": True, "sql": sql, "answer": answer}
     except Exception as e:
         return {
-            "sql": sql,
             "success": False,
-            "error": str(e),
-            "results": [],
+            "sql": sql,
+            "answer": f"Query error: {e}\n\n---\n*SQL attempted:* `{sql}`",
         }
