@@ -19,16 +19,29 @@ Rules:
 - Never modify or delete data"""
 
 
-def generate_sql(question: str, context: str = "") -> str:
+def generate_sql(
+    question: str,
+    long_term_context: str = "",
+    conversation_history: str = "",
+) -> str:
     schema = get_table_schema()
     system_prompt = SQL_SYSTEM_PROMPT.format(schema=schema)
-
     messages = [{"role": "system", "content": system_prompt}]
 
-    if context:
+    if conversation_history:
         messages.append({
             "role": "system",
-            "content": f"Conversation context:\n{context}",
+            "content": (
+                "This is a conversation. Use the history below to resolve "
+                "pronouns and follow-up references in the user's question.\n"
+                f"{conversation_history}"
+            ),
+        })
+
+    if long_term_context:
+        messages.append({
+            "role": "system",
+            "content": long_term_context,
         })
 
     messages.append({"role": "user", "content": question})
@@ -42,8 +55,16 @@ def generate_sql(question: str, context: str = "") -> str:
     return sql
 
 
-def query_database(question: str, context: str = "") -> dict:
-    sql = generate_sql(question, context)
+def query_database(
+    question: str,
+    long_term_context: str = "",
+    conversation_history: str = "",
+) -> dict:
+    sql = generate_sql(
+        question,
+        long_term_context=long_term_context,
+        conversation_history=conversation_history,
+    )
     try:
         results = execute_sql(sql)
         row_count = len(results)

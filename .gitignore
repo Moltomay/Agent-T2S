@@ -19,6 +19,9 @@ env/
 *.swp
 *.swo
 
+# Session
+.session_id
+
 # OS
 .DS_Store
 Thumbs.db
