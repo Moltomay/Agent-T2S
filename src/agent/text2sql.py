@@ -19,6 +19,13 @@ Rules:
 - Only use SELECT statements
 - Never modify or delete data"""
 
+FORMAT_SYSTEM_PROMPT = """Given the user's question and the database results, answer clearly and naturally.
+- Be concise
+- If it's a single number/name, state it directly
+- If it's a list, summarise it conversationally
+- Do not mention SQL, queries, or technical details
+- If there's an error, say so simply"""
+
 
 def generate_sql(
     question: str,
@@ -55,37 +62,29 @@ def generate_sql(
     return sql
 
 
-def _format_row(row: dict) -> str:
-    """Format a single result row as readable text."""
-    parts = []
-    for key, val in row.items():
-        if val is None:
-            continue
-        label = key.replace("_", " ").title()
-        if isinstance(val, float | int):
-            parts.append(f"{label}: {val}")
-        else:
-            parts.append(f"{label}: {val}")
-    return " | ".join(parts)
-
-
-def _format_results(question: str, results: list[dict], row_count: int) -> str:
-    """Format results as clean readable text, no LLM call."""
+def format_response(question: str, results: list[dict], row_count: int, sql: str) -> str:
     if row_count == 0:
-        return "No results found."
+        return f"No results found.\n\n---\n*SQL query used:* `{sql}`"
 
-    cols = list(results[0].keys())
-    is_aggregate = len(cols) <= 2 and row_count == 1
+    preview = json.dumps(results[:10], indent=2, default=str)
+    if len(results) > 10:
+        preview += "\n..."
 
-    if is_aggregate and len(cols) == 1:
-        return str(results[0][cols[0]])
+    answer = chat(
+        [
+            {"role": "system", "content": FORMAT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n"
+                    f"Results ({row_count} rows):\n{preview}"
+                ),
+            },
+        ],
+        model_key="format",
+    )
 
-    lines = []
-    for row in results[:20]:
-        lines.append(_format_row(row))
-    if row_count > 20:
-        lines.append(f"... and {row_count - 20} more rows")
-    return "\n".join(lines)
+    return f"{answer}\n\n---\n*SQL query used:* `{sql}`"
 
 
 def process_question(
@@ -109,8 +108,7 @@ def process_question(
     try:
         results = execute_sql(sql)
         row_count = len(results)
-        data = _format_results(question, results, row_count)
-        answer = f"{data}\n\n---\n*SQL query used:* `{sql}`"
+        answer = format_response(question, results, row_count, sql)
         return {"success": True, "sql": sql, "answer": answer}
     except Exception as e:
         return {
