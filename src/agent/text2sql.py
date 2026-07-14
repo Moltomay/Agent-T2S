@@ -19,8 +19,6 @@ Rules:
 - Only use SELECT statements
 - Never modify or delete data"""
 
-RESPONSE_SYSTEM_PROMPT = """Given results from a database query, answer the user's question in 1-2 clear sentences. Do not mention SQL or queries — just answer naturally. If the result is empty, say so."""
-
 
 def generate_sql(
     question: str,
@@ -57,23 +55,37 @@ def generate_sql(
     return sql
 
 
-def format_response(question: str, sql: str, results: list, row_count: int) -> str:
+def _format_row(row: dict) -> str:
+    """Format a single result row as readable text."""
+    parts = []
+    for key, val in row.items():
+        if val is None:
+            continue
+        label = key.replace("_", " ").title()
+        if isinstance(val, float | int):
+            parts.append(f"{label}: {val}")
+        else:
+            parts.append(f"{label}: {val}")
+    return " | ".join(parts)
+
+
+def _format_results(question: str, results: list[dict], row_count: int) -> str:
+    """Format results as clean readable text, no LLM call."""
     if row_count == 0:
-        return f"No results found.\n\n---\n*SQL query used:* `{sql}`"
+        return "No results found."
 
-    preview = json.dumps(results[:10], indent=2, default=str)
-    if len(results) > 10:
-        preview += "\n..."
+    cols = list(results[0].keys())
+    is_aggregate = len(cols) <= 2 and row_count == 1
 
-    answer = chat([
-        {"role": "system", "content": RESPONSE_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"Question: {question}\nResults ({row_count} rows):\n{preview}",
-        },
-    ])
+    if is_aggregate and len(cols) == 1:
+        return str(results[0][cols[0]])
 
-    return f"{answer}\n\n---\n*SQL query used:* `{sql}`"
+    lines = []
+    for row in results[:20]:
+        lines.append(_format_row(row))
+    if row_count > 20:
+        lines.append(f"... and {row_count - 20} more rows")
+    return "\n".join(lines)
 
 
 def process_question(
@@ -97,7 +109,8 @@ def process_question(
     try:
         results = execute_sql(sql)
         row_count = len(results)
-        answer = format_response(question, sql, results, row_count)
+        data = _format_results(question, results, row_count)
+        answer = f"{data}\n\n---\n*SQL query used:* `{sql}`"
         return {"success": True, "sql": sql, "answer": answer}
     except Exception as e:
         return {

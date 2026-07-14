@@ -94,13 +94,18 @@ class DatabaseAgent:
         conv_history = self.short_term.get_conversation_summary()
         long_context = self.long_term.get_summary_context(self.session_id)
 
-        result = process_question(
-            question,
-            long_term_context=long_context,
-            conversation_history=conv_history,
-        )
-
-        return result["answer"]
+        try:
+            result = process_question(
+                question,
+                long_term_context=long_context,
+                conversation_history=conv_history,
+            )
+            return result["answer"]
+        except Exception as e:
+            msg = str(e)
+            if "rate-limited" in msg.lower():
+                return "The free LLM tier is currently rate-limited. Please wait a moment and try again."
+            return f"Error: {msg}"
 
     def _store_summary(self, question: str, answer: str):
         summary = chat([

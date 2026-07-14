@@ -1,8 +1,6 @@
 import os
-import time
-import re as _re
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError, NotFoundError
+from openai import OpenAI, RateLimitError, NotFoundError, APIStatusError
 
 load_dotenv()
 
@@ -23,7 +21,8 @@ def get_client() -> OpenAI:
     return OpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,
-        timeout=60,
+        timeout=15,
+        max_retries=0,
     )
 
 
@@ -36,24 +35,24 @@ def chat(messages: list[dict], model: str | None = None) -> str:
 
     last_error = None
     for attempt_model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.chat.completions.create(
-                    model=attempt_model,
-                    messages=messages,
-                    temperature=0.1,
-                )
-                return response.choices[0].message.content or ""
-            except RateLimitError as e:
+        try:
+            response = client.chat.completions.create(
+                model=attempt_model,
+                messages=messages,
+                temperature=0.1,
+            )
+            return response.choices[0].message.content or ""
+        except RateLimitError as e:
+            last_error = e
+            continue
+        except NotFoundError:
+            continue
+        except APIStatusError as e:
+            if e.status_code == 429:
                 last_error = e
-                meta = str(e)
-                match = _re.search(r"retry_after_seconds[\"':]+\s*(\d+)", meta)
-                wait = int(match.group(1)) + 1 if (match and int(match.group(1)) < 30) else 5
-                time.sleep(wait)
                 continue
-            except NotFoundError:
-                break
-            except Exception:
-                raise
+            raise
+        except Exception:
+            raise
 
-    raise last_error or Exception("All models unavailable")
+    raise last_error or Exception("All LLM providers rate-limited. Try again later.")

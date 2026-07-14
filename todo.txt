@@ -1,0 +1,13 @@
+- Test memory all stored in md files a la hermes, openclaw 
+
+- Make sure Loop is instaured aka: LLM generates sql query —> output from DB —> back to LLM —> LLM answers in clean format(if error he should say it if not answer cleanly)
+
+- As of now LLM gets previous Q’s context etc using the history table thus SQL, need to make the LLM reason to not always go to SQL so go from workflow —-> agentic
+
+- Add LLM reasoning so that he reasons over the output before answering to see IF a new query needed (here notion of tools thus needs to be added to its context needed)
+
+- Passing DB schema every turn could prove to be expensive in terms of input tokens IF large DB, implement JSON idea or else to pass what’s needed
+
+- Context compaction in case of long convo to avoid fillong LLM’s context window
+
+- Guardrails: NO WRITE QUERIES + Prompt injection 
