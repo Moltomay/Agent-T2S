@@ -64,19 +64,84 @@ class DatabaseAgent:
         self.short_term.add("assistant", answer)
 
         if self.turn_count % 5 == 0:
-            self._store_summary(user_message, answer)
+            self._store_leaf()
 
         return answer
 
-    def _store_summary(self, question: str, answer: str):
-        summary = chat([
-            {"role": "system", "content": "Summarise in 1-2 sentences."},
-            {"role": "user", "content": f"Q: {question}\nA: {answer}"},
-        ])
-        self.long_term.store(self.session_id, summary, self.turn_count)
+    def _format_last_turns(self, n: int = 5) -> str:
+        recent = self.short_term.history[-(n * 2):]
+        lines = []
+        for entry in recent:
+            role = "User" if entry["role"] == "user" else "Assistant"
+            lines.append(f"{role}: {entry['content']}")
+        return "\n".join(lines)
+
+    def _store_leaf(self):
+        conversation_block = self._format_last_turns(5)
+        try:
+            leaf_summary = chat(
+                [
+                    {"role": "system", "content": "Summarise the following conversation in 1-2 sentences."},
+                    {"role": "user", "content": conversation_block},
+                ],
+                model_key="format",
+            )
+        except Exception:
+            leaf_summary = "(summary unavailable)"
+        turn_start = max(1, self.turn_count - 4)
+        self.long_term.store(
+            self.session_id, leaf_summary, self.turn_count,
+            level=1, turn_start=turn_start,
+        )
+        self._try_rollup()
+
+    def _try_rollup(self):
+        active_leafs = self.long_term.get_active_entries(self.session_id, level=1)
+        while len(active_leafs) >= 4:
+            batch = active_leafs[:4]
+            texts = [e.summary for e in batch]
+            try:
+                block_summary = chat(
+                    [
+                        {"role": "system", "content": "Combine these summaries into a single summary of 1-2 sentences."},
+                        {"role": "user", "content": "\n".join(f"- {t}" for t in texts)},
+                    ],
+                    model_key="format",
+                )
+            except Exception:
+                break
+            child_ids = [e.id for e in batch]
+            self.long_term.store(
+                self.session_id, block_summary, batch[-1].turn_count,
+                level=2, turn_start=batch[0].turn_start,
+            )
+            self.long_term.mark_inactive(child_ids)
+            active_leafs = self.long_term.get_active_entries(self.session_id, level=1)
+
+        active_blocks = self.long_term.get_active_entries(self.session_id, level=2)
+        while len(active_blocks) >= 2:
+            batch = active_blocks[:2]
+            texts = [e.summary for e in batch]
+            try:
+                broad_summary = chat(
+                    [
+                        {"role": "system", "content": "Combine these into one high-level summary of 1-2 sentences."},
+                        {"role": "user", "content": "\n".join(f"- {t}" for t in texts)},
+                    ],
+                    model_key="format",
+                )
+            except Exception:
+                break
+            child_ids = [e.id for e in batch]
+            self.long_term.store(
+                self.session_id, broad_summary, batch[-1].turn_count,
+                level=3, turn_start=batch[0].turn_start,
+            )
+            self.long_term.mark_inactive(child_ids)
+            active_blocks = self.long_term.get_active_entries(self.session_id, level=2)
 
     def get_history(self) -> list[dict]:
         return self.short_term.history
 
     def get_long_term_summaries(self) -> list:
-        return self.long_term.get_recent(self.session_id)
+        return self.long_term.get_active_entries(self.session_id)
