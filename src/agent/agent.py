@@ -19,18 +19,30 @@ def _load_session_id() -> str:
                     return sid
     except Exception:
         pass
-    sid = str(uuid.uuid4())[:8]
+    return ""
+
+
+def _save_session_id(sid: str):
     try:
         with open(SESSION_FILE, "w") as f:
             f.write(sid)
     except Exception:
         pass
+
+
+def _generate_session_id() -> str:
+    sid = str(uuid.uuid4())[:8]
+    _save_session_id(sid)
     return sid
 
 
 class DatabaseAgent:
-    def __init__(self):
-        self.session_id = _load_session_id()
+    def __init__(self, session_id: str | None = None):
+        if session_id:
+            self.session_id = session_id
+            _save_session_id(session_id)
+        else:
+            self.session_id = _generate_session_id()
         self.short_term = ShortTermMemory(max_turns=10)
         self.long_term = LongTermMemory()
         self.turn_count = 0

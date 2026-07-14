@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, DateTime, Text, create_engine
+    Column, Integer, String, DateTime, Text, create_engine, func as sa_func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -43,6 +43,28 @@ class LongTermMemory:
             .limit(limit)
             .all()
         )
+
+    def get_available_sessions(self) -> list[dict]:
+        rows = (
+            self.session.query(
+                MemoryEntry.session_id,
+                sa_func.max(MemoryEntry.turn_count).label("turn_count"),
+                sa_func.count(MemoryEntry.id).label("summary_count"),
+                sa_func.max(MemoryEntry.created_at).label("last_activity"),
+            )
+            .group_by(MemoryEntry.session_id)
+            .order_by(sa_func.max(MemoryEntry.created_at).desc())
+            .all()
+        )
+        return [
+            {
+                "session_id": r.session_id,
+                "turn_count": r.turn_count,
+                "summary_count": r.summary_count,
+                "last_activity": r.last_activity,
+            }
+            for r in rows
+        ]
 
     def get_summary_context(self, session_id: str) -> str:
         entries = self.get_recent(session_id)

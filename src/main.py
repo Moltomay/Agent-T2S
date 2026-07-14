@@ -15,6 +15,37 @@ def print_banner():
     print("=" * 60)
 
 
+def _pick_session() -> str | None:
+    from src.memory.long_term import LongTermMemory
+
+    long_term = LongTermMemory()
+    sessions = long_term.get_available_sessions()
+    long_term.close()
+
+    if not sessions:
+        return None
+
+    print("\nExisting sessions:")
+    print("  " + "-" * 55)
+    for i, s in enumerate(sessions, 1):
+        ts = s["last_activity"].strftime("%Y-%m-%d %H:%M") if s["last_activity"] else "?"
+        print(f"  {i}. {s['session_id']} — {s['turn_count']} turns, {s['summary_count']} memories, last {ts}")
+    print("  " + "-" * 55)
+    choice = input("  [n]ew session, or pick a number to continue [n]: ").strip().lower()
+
+    if choice == "n" or choice == "":
+        return None
+
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(sessions):
+            return sessions[idx]["session_id"]
+    except ValueError:
+        pass
+
+    return None
+
+
 def main():
     from src.db.seed import seed_database
     from src.agent.agent import DatabaseAgent
@@ -23,8 +54,12 @@ def main():
     seed_database()
     print("Database ready.")
 
-    agent = DatabaseAgent()
-    print(f"Session ID: {agent.session_id}\n")
+    session_id = _pick_session()
+    agent = DatabaseAgent(session_id=session_id)
+    if session_id:
+        print(f"Continuing session: {agent.session_id}\n")
+    else:
+        print(f"New session: {agent.session_id}\n")
 
     print_banner()
 
