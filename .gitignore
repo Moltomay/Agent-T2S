@@ -22,6 +22,9 @@ env/
 # Session
 .session_id
 
+# Notes
+todo.txt
+
 # OS
 .DS_Store
 Thumbs.db
