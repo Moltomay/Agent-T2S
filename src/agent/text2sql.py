@@ -51,12 +51,15 @@ SELECT name, email FROM customers LIMIT 10
 ```
 """
 
-FORMAT_SYSTEM_PROMPT = """Given the user's question and the database results, answer clearly and naturally.
+REFLECTION_SYSTEM_PROMPT = """You queried the database. Review the results and answer the user's question.
+
+Rules:
 - Be concise
 - If it's a single number/name, state it directly
 - If it's a list, summarise it conversationally
 - Do not mention SQL, queries, or technical details
-- If there's an error, say so simply"""
+- If the results don't fully answer the question, say so
+- Use conversation history to resolve pronouns and follow-ups"""
 
 # Tokens that are NEVER allowed in any position
 FORBIDDEN_TOKENS = [
@@ -165,29 +168,55 @@ def _parse_agent_response(raw: str) -> dict:
     return {"action": "reply", "content": stripped}
 
 
-def format_response(question: str, results: list[dict], row_count: int, sql: str) -> str:
-    if row_count == 0:
-        return f"No results found.\n\n---\n*SQL query used:* `{sql}`"
+def _reflect(
+    question: str,
+    sql: str,
+    results: list[dict],
+    conversation_history: str = "",
+) -> str:
+    if len(results) == 0:
+        reflection = chat(
+            [
+                {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question: {question}\n"
+                        f"SQL: {sql}\n"
+                        f"Results: 0 rows returned.\n"
+                    ),
+                },
+            ],
+        )
+        return f"{reflection}\n\n---\n*SQL query used:* `{sql}`"
 
     preview = json.dumps(results[:10], indent=2, default=str)
     if len(results) > 10:
         preview += "\n..."
 
-    answer = chat(
-        [
-            {"role": "system", "content": FORMAT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Question: {question}\n"
-                    f"Results ({row_count} rows):\n{preview}"
-                ),
-            },
-        ],
-        model_key="format",
-    )
+    messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT}]
 
-    return f"{answer}\n\n---\n*SQL query used:* `{sql}`"
+    if conversation_history:
+        messages.append({
+            "role": "system",
+            "content": f"Recent conversation:\n{conversation_history}",
+        })
+
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Question: {question}\n"
+            f"SQL: {sql}\n"
+            f"Results ({len(results)} rows):\n{preview}"
+        ),
+    })
+
+    try:
+        reflection = chat(messages)
+    except Exception:
+        reflection = f"Found {len(results)} result(s)."
+
+    return f"{reflection}\n\n---\n*SQL query used:* `{sql}`"
 
 
 def process_question(
@@ -244,8 +273,10 @@ def process_question(
 
     try:
         results = execute_sql(sql)
-        row_count = len(results)
-        answer = format_response(question, results, row_count, sql)
+        answer = _reflect(
+            question, sql, results,
+            conversation_history=conversation_history,
+        )
         return {
             "success": True,
             "sql": sql,

@@ -8,33 +8,35 @@ A proof-of-concept agent that answers natural language questions about a Postgre
 User Input
     │
     ▼
-┌──────────────────────────────────────┐
-│  DatabaseAgent (src/agent/agent.py)  │
-│                                      │
-│  ┌─ ReAct decision ──────────────┐   │
-│  │  Gemma decides: REPLY or TOOL │   │
-│  └──────────┬────────────────────┘   │
-│             │                        │
-│  ┌──────────▼──────────┐             │
-│  │  REPLY: return      │             │
-│  │  directly           │             │
-│  └─────────────────────┘             │
-│  ┌──────────▼──────────┐             │
-│  │  TOOL:              │             │
-│  │  ➜ generate_sql()  │             │
-│  │  ➜ validate_sql()  │             │
-│  │  ➜ execute_sql()   │             │
-│  │  ➜ format (Llama)  │             │
-│  └─────────────────────┘             │
-│                                      │
-│  Memory layers:                      │
-│  ┌────────────┐ ┌───────────────┐    │
-│  │ Short-term │ │ Long-term     │    │
-│  │ (RAM)      │ │ (RAM cache +  │    │
-│  │ last 6     │ │  DB for       │    │
-│  │ turns raw  │ │  persistence) │    │
-│  └────────────┘ └───────────────┘    │
-└──────────────────┬───────────────────┘
+┌──────────────────────────────────────────┐
+│  DatabaseAgent (src/agent/agent.py)      │
+│                                          │
+│  ┌─ ReAct decision ──────────────────┐   │
+│  │  Gemma decides: REPLY or TOOL     │   │
+│  │  (sees long-term + short-term)    │   │
+│  └──────────┬────────────────────────┘   │
+│             │                            │
+│  ┌──────────▼──────────┐                 │
+│  │  REPLY: return      │                 │
+│  │  directly           │                 │
+│  └─────────────────────┘                 │
+│  ┌──────────▼──────────┐                 │
+│  │  TOOL:              │                 │
+│  │  ➜ generate_sql()  │                 │
+│  │  ➜ validate_sql()  │                 │
+│  │  ➜ execute_sql()   │                 │
+│  │  ➜ reflect (Gemma) │ ◄── reasons     │
+│  │    evaluates output │     over results│
+│  └─────────────────────┘                 │
+│                                          │
+│  Memory layers:                          │
+│  ┌────────────┐ ┌───────────────┐        │
+│  │ Short-term │ │ Long-term     │        │
+│  │ (RAM)      │ │ (RAM cache +  │        │
+│  │ last 6     │ │  DB for       │        │
+│  │ turns raw  │ │  persistence) │        │
+│  └────────────┘ └───────────────┘        │
+└──────────────────┬───────────────────────┘
                    │
                    ▼
 ┌──────────────────────────────┐
@@ -73,6 +75,10 @@ poc-agent-db/
         ├── short_term.py  # In-memory conversation buffer (last 10 turns)
         └── long_term.py   # Hierarchical memory: leafs → blocks → broads
 ```
+
+**Two-model split:**
+- **Gemma (31B):** Agent decision (REPLY vs TOOL), SQL generation, result reflection
+- **Llama 3.2 (3B):** Hierarchical memory summarization only (leafs, blocks, broads)
 
 ## Quick Start
 
@@ -161,7 +167,7 @@ Turns 16-20: Leaf4 created → rollup → Block1 replaces Leaf1-4 (inactive)
 - **During session:** New leafs appended to RAM cache (zero DB reads). Rollups reload the cache from DB
 - **Result:** Zero database queries during normal turns. The last 6 raw turns (from short-term) fill in the detailed recent window
 
-**Summarization model:** Llama 3.2 3B (format model) — not Gemma. Gemma is reserved for agent reasoning and SQL generation.
+**Summarization model:** Llama 3.2 3B — used for all summarization (leafs, blocks, broads). Not used in the SQL pipeline. Gemma handles agent decisions, SQL generation, and result reflection.
 
 **Persistence:** Leafs, blocks, and broads are all stored permanently in PostgreSQL. Inactive entries remain in the DB (is_active=False) for future retrieval via semantic search.
 
