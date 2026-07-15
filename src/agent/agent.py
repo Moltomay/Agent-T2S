@@ -71,6 +71,15 @@ class DatabaseAgent:
         answer = result.get("answer", "Error: no response from agent.")
         self.short_term.add("assistant", answer)
 
+        reflections = result.get("reflections", [])
+        if reflections:
+            for i, ref in enumerate(reflections, 1):
+                if ref.get("raw"):
+                    print(f"  [Reflection {i}] {ref['raw'].strip()}")
+                if ref.get("sql"):
+                    print(f"  [SQL {i}] {ref['sql']}")
+            print()
+
         if self.turn_count % 5 == 0:
             self._store_leaf()
 

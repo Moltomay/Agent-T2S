@@ -93,9 +93,8 @@ def main():
                     print(f"\n[{ts}] (turn {s.turn_count})\n{s.summary}")
             continue
 
-        print("\nAgent: ", end="", flush=True)
         response = agent.process_message(user_input)
-        print(response)
+        print(f"Agent: {response}")
 
 
 if __name__ == "__main__":
