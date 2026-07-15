@@ -51,15 +51,22 @@ SELECT name, email FROM customers LIMIT 10
 ```
 """
 
-REFLECTION_SYSTEM_PROMPT = """You queried the database. Review the results and answer the user's question.
+REFLECTION_SYSTEM_PROMPT = """You are in a multi-step reasoning loop. You previously queried the database. Decide if the results answer the user's question or if you need more data.
+
+If the results fully answer the question, output:
+REPLY
+Your answer here
+
+If you need additional data to answer correctly, output a new SQL query:
+TOOL
+```sql
+SELECT ...
+```
 
 Rules:
-- Be concise
-- If it's a single number/name, state it directly
-- If it's a list, summarise it conversationally
-- Do not mention SQL, queries, or technical details
-- If the results don't fully answer the question, say so
-- Use conversation history to resolve pronouns and follow-ups"""
+- Be concise. Name specific values, counts, names.
+- Do not mention SQL, queries, or technical details in your REPLY
+- Use conversation history and previous queries to resolve pronouns and follow-ups"""
 
 # Tokens that are NEVER allowed in any position
 FORBIDDEN_TOKENS = [
@@ -168,33 +175,23 @@ def _parse_agent_response(raw: str) -> dict:
     return {"action": "reply", "content": stripped}
 
 
+MAX_ITERATIONS = 5
+
+
 def _reflect(
     question: str,
     sql: str,
     results: list[dict],
+    accumulated_context: str = "",
     conversation_history: str = "",
-) -> str:
-    if len(results) == 0:
-        reflection = chat(
-            [
-                {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Question: {question}\n"
-                        f"SQL: {sql}\n"
-                        f"Results: 0 rows returned.\n"
-                    ),
-                },
-            ],
-        )
-        return f"{reflection}\n\n---\n*SQL query used:* `{sql}`"
-
-    preview = json.dumps(results[:10], indent=2, default=str)
-    if len(results) > 10:
-        preview += "\n..."
-
+) -> dict:
     messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT}]
+
+    if accumulated_context:
+        messages.append({
+            "role": "system",
+            "content": f"Previous queries from this session:\n{accumulated_context}",
+        })
 
     if conversation_history:
         messages.append({
@@ -202,21 +199,34 @@ def _reflect(
             "content": f"Recent conversation:\n{conversation_history}",
         })
 
+    preview = json.dumps(results[:10], indent=2, default=str) if results else "0 rows returned."
+    if len(results) > 10:
+        preview += "\n..."
+
     messages.append({
         "role": "user",
         "content": (
             f"Question: {question}\n"
-            f"SQL: {sql}\n"
-            f"Results ({len(results)} rows):\n{preview}"
+            f"Latest SQL: {sql}\n"
+            f"Latest results ({len(results)} rows):\n{preview}"
         ),
     })
 
     try:
-        reflection = chat(messages)
+        raw = chat(messages)
     except Exception:
-        reflection = f"Found {len(results)} result(s)."
+        return {"action": "reply", "content": f"Found {len(results)} result(s)."}
 
-    return f"{reflection}\n\n---\n*SQL query used:* `{sql}`"
+    return _parse_agent_response(raw)
+
+
+def _build_audit_trail(all_sqls: list[str]) -> str:
+    if not all_sqls:
+        return ""
+    parts = []
+    for i, s in enumerate(all_sqls, 1):
+        parts.append(f"  {i}. `{s}`")
+    return "\n".join(parts)
 
 
 def process_question(
@@ -252,41 +262,68 @@ def process_question(
             "action": "reply",
         }
 
-    sql = parsed["content"]
+    accumulated_context = ""
+    all_sqls = []
+    current_sql = parsed["content"]
 
-    if not sql:
-        return {
-            "success": False,
-            "sql": "",
-            "answer": "Could not generate a valid SQL query.",
-            "action": "tool",
-        }
+    for attempt in range(MAX_ITERATIONS):
+        if not current_sql:
+            return {
+                "success": False,
+                "sql": "",
+                "answer": "Could not generate a valid SQL query.",
+                "action": "tool",
+            }
 
-    is_safe, reason = validate_sql(sql)
-    if not is_safe:
-        return {
-            "success": False,
-            "sql": sql,
-            "answer": f"Query blocked by guardrail: {reason}\n\n---\n*SQL attempted:* `{sql}`",
-            "action": "tool",
-        }
+        is_safe, reason = validate_sql(current_sql)
+        if not is_safe:
+            return {
+                "success": False,
+                "sql": current_sql,
+                "answer": f"Query blocked by guardrail: {reason}\n\n---\n*SQL attempted:* `{current_sql}`",
+                "action": "tool",
+            }
 
-    try:
-        results = execute_sql(sql)
-        answer = _reflect(
-            question, sql, results,
+        try:
+            results = execute_sql(current_sql)
+        except Exception as e:
+            return {
+                "success": False,
+                "sql": current_sql,
+                "answer": f"Query error: {e}\n\n---\n*SQL attempted:* `{current_sql}`",
+                "action": "tool",
+            }
+
+        all_sqls.append(current_sql)
+
+        parsed = _reflect(
+            question, current_sql, results,
+            accumulated_context=accumulated_context,
             conversation_history=conversation_history,
         )
-        return {
-            "success": True,
-            "sql": sql,
-            "answer": answer,
-            "action": "tool",
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "sql": sql,
-            "answer": f"Query error: {e}\n\n---\n*SQL attempted:* `{sql}`",
-            "action": "tool",
-        }
+
+        if parsed["action"] == "reply":
+            audit = _build_audit_trail(all_sqls)
+            answer = f"{parsed['content']}\n\n---\n*SQL queries used:*\n{audit}"
+            return {
+                "success": True,
+                "sql": current_sql,
+                "answer": answer,
+                "action": "tool",
+            }
+
+        preview = json.dumps(results[:5], indent=2, default=str) if results else "0 rows returned."
+        if len(results) > 5:
+            preview += "\n..."
+        step_label = f"[Step {len(all_sqls)}]"
+        accumulated_context += f"{step_label}\nSQL: {current_sql}\nResults ({len(results)} rows):\n{preview}\n\n"
+
+        current_sql = parsed["content"]
+
+    audit = _build_audit_trail(all_sqls)
+    return {
+        "success": False,
+        "sql": current_sql,
+        "answer": f"Reached maximum iterations ({MAX_ITERATIONS}).\n\n---\n*SQL queries used:*\n{audit}",
+        "action": "tool",
+    }
