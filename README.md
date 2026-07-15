@@ -8,29 +8,44 @@ A proof-of-concept agent that answers natural language questions about a Postgre
 User Input
     │
     ▼
-┌─────────────────────────────┐
-│  DatabaseAgent (src/agent/) │
-│  ┌───────────┐ ┌─────────┐  │
-│  │ text2sql  │ │ llm_cli │  │
-│  │           │ │ ent     │  │
-│  └─────┬─────┘ └─────────┘  │
-│        │                    │
-│  ┌─────▼─────┐              │
-│  │ short_term│ memory       │
-│  │ long_term │              │
-│  └───────────┘              │
-└─────────┬───────────────────┘
-          │
-          ▼
-┌─────────────────────────────┐
-│  PostgreSQL (Docker)        │
-│  ┌─────────┐ ┌───────────┐  │
-│  │customers│ │ products   │  │
-│  │orders   │ │ order_items│  │
-│  │agent_   │ │            │  │
-│  │memory   │ │            │  │
-│  └─────────┘ └───────────┘  │
-└─────────────────────────────┘
+┌──────────────────────────────────────┐
+│  DatabaseAgent (src/agent/agent.py)  │
+│                                      │
+│  ┌─ ReAct decision ──────────────┐   │
+│  │  Gemma decides: REPLY or TOOL │   │
+│  └──────────┬────────────────────┘   │
+│             │                        │
+│  ┌──────────▼──────────┐             │
+│  │  REPLY: return      │             │
+│  │  directly           │             │
+│  └─────────────────────┘             │
+│  ┌──────────▼──────────┐             │
+│  │  TOOL:              │             │
+│  │  ➜ generate_sql()  │             │
+│  │  ➜ validate_sql()  │             │
+│  │  ➜ execute_sql()   │             │
+│  │  ➜ format (Llama)  │             │
+│  └─────────────────────┘             │
+│                                      │
+│  Memory layers:                      │
+│  ┌────────────┐ ┌───────────────┐    │
+│  │ Short-term │ │ Long-term     │    │
+│  │ (RAM)      │ │ (RAM cache +  │    │
+│  │ last 6     │ │  DB for       │    │
+│  │ turns raw  │ │  persistence) │    │
+│  └────────────┘ └───────────────┘    │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────┐
+│  PostgreSQL (Docker)         │
+│  ┌─────────┐ ┌──────────┐   │
+│  │customers│ │ products  │   │
+│  │orders   │ │order_items│   │
+│  │agent_   │ │          │   │
+│  │memory   │ │          │   │
+│  └─────────┘ └──────────┘   │
+└──────────────────────────────┘
 ```
 
 ## Project Structure
@@ -39,10 +54,10 @@ User Input
 poc-agent-db/
 ├── .env.example         # Environment variables template
 ├── requirements.txt     # Python dependencies
-├── test_db.py           # Quick DB verification script
+├── todo.txt             # Local scratchpad (gitignored)
 └── src/
     ├── __init__.py
-    ├── main.py          # CLI entry point
+    ├── main.py          # CLI entry point with session picker
     ├── db/
     │   ├── __init__.py
     │   ├── connection.py  # SQLAlchemy engine & session management
@@ -50,13 +65,13 @@ poc-agent-db/
     │   └── seed.py        # Sample data seeding
     ├── agent/
     │   ├── __init__.py
-    │   ├── llm_client.py  # OpenAI-compatible LLM wrapper
-    │   ├── text2sql.py    # Text-to-SQL generation & execution
-    │   └── agent.py       # Agent orchestrator
+    │   ├── llm_client.py  # OpenAI-compatible LLM wrapper, fallback chain
+    │   ├── text2sql.py    # ReAct agent + SQL pipeline + guardrails
+    │   └── agent.py       # Memory orchestration, summarization, rollup
     └── memory/
         ├── __init__.py
-        ├── short_term.py  # Conversation buffer (last N turns)
-        └── long_term.py   # Persisted summaries (stored in DB)
+        ├── short_term.py  # In-memory conversation buffer (last 10 turns)
+        └── long_term.py   # Hierarchical memory: leafs → blocks → broads
 ```
 
 ## Quick Start
@@ -110,15 +125,45 @@ python src/main.py
 ## Memory Architecture
 
 ### Short-Term Memory (`src/memory/short_term.py`)
-- Stores the last N conversation turns (configurable, default 10)
-- Used as context for the LLM to maintain conversation flow
-- In-memory buffer (cleared on restart)
+- Stores the last 10 conversation turns (5 user + 5 assistant) in RAM
+- The last 6 turns are injected verbatim into the agent prompt every turn
+- Cleared on restart (ephemeral)
 
 ### Long-Term Memory (`src/memory/long_term.py`)
-- Every 5 turns, the agent summarises the recent interaction
-- Summaries are stored in the `agent_memory` table in PostgreSQL
-- On each query, recent summaries are injected as context
-- Persists across sessions via the session ID
+
+Hierarchical summarization stored in the `agent_memory` PostgreSQL table:
+
+```
+Level 1 — Leaf:     Every 5 turns, Llama summarizes the last 5 turns
+Level 2 — Block:    When 4 leafs exist, they roll into 1 block summary
+Level 3 — Broad:    When 2 blocks exist, they roll into 1 broad summary
+```
+
+**Lifecycle example (20 turns):**
+
+```
+Turns 1-5:   Leaf1 created (active)
+Turns 6-10:  Leaf2 created (active)
+Turns 11-15: Leaf3 created (active)
+Turns 16-20: Leaf4 created → rollup → Block1 replaces Leaf1-4 (inactive)
+```
+
+| After turn | Active in DB | Injected into prompt |
+|-----------|-------------|---------------------|
+| 1-5 | Leaf1 | Leaf1 + raw turns 1-5 |
+| 6-10 | Leaf1, Leaf2 | Leaf1-2 + raw turns 6-10 |
+| 11-15 | Leaf1, Leaf2, Leaf3 | Leaf1-3 + raw turns 11-15 |
+| 20 | Block1 | Block1 + raw turns 16-20 |
+| 25 | Block1, Leaf5 | Block1 + Leaf5 + raw turns 21-25 |
+
+**Context injection behaviour:**
+- **Cold start:** Active entries loaded from PostgreSQL into a RAM cache once on the first turn
+- **During session:** New leafs appended to RAM cache (zero DB reads). Rollups reload the cache from DB
+- **Result:** Zero database queries during normal turns. The last 6 raw turns (from short-term) fill in the detailed recent window
+
+**Summarization model:** Llama 3.2 3B (format model) — not Gemma. Gemma is reserved for agent reasoning and SQL generation.
+
+**Persistence:** Leafs, blocks, and broads are all stored permanently in PostgreSQL. Inactive entries remain in the DB (is_active=False) for future retrieval via semantic search.
 
 ## LLM Providers Supported
 
