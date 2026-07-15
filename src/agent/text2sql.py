@@ -59,44 +59,26 @@ SELECT name, email FROM customers LIMIT 10
 ```
 """
 
-REFLECTION_SYSTEM_PROMPT = """You are in a multi-step reasoning loop. You previously queried the database. Decide if the results answer the user's question or if you need more data.
+REFLECTION_SYSTEM_PROMPT = """You are in a multi-step reasoning loop. You previously queried the database. Based on the outcome, decide what to do next.
 
-If the results fully answer the question, output:
-REPLY
-Your answer here
+### If the query succeeded:
+If the results fully answer the question → REPLY with your answer.
+If you need additional data to answer correctly → TOOL with a new SQL query.
 
-If you need additional data to answer correctly, output a new SQL query:
-TOOL
-```sql
-SELECT ...
-```
+### If the query failed with a database error:
+Fix the column names, table names, or syntax → TOOL with corrected SQL.
+If you cannot fix it → REPLY explaining the issue to the user.
+
+Schema:
+{schema}
 
 Rules:
 - Be concise. Name specific values, counts, names.
 - Do not mention SQL, queries, or technical details in your REPLY
 - Use conversation history and previous queries to resolve pronouns and follow-ups
-- Think step by step. Start your reasoning with THINK: then decide. Your full reasoning is shown to the user so be clear and traceable."""
-
-ERROR_RECOVERY_PROMPT = """Your SQL query failed with a database error. Fix the column names, table names, or syntax and try again.
-
-Schema:
-{schema}
-
-If you can fix the query, output:
-TOOL
-```sql
-SELECT ...
-```
-
-If you cannot fix it, explain the issue to the user:
-REPLY
-Your explanation here
-
-Rules:
 - Check column and table names carefully against the schema above
 - Look at the error message closely — it often tells you the exact column or table that is wrong
-- Output only one SQL query at a time
-- Think step by step. Start with THINK: then decide."""
+- Think step by step. Start your reasoning with THINK: then decide. Your full reasoning is shown to the user so be clear and traceable."""
 
 # Tokens that are NEVER allowed in any position
 FORBIDDEN_TOKENS = [
@@ -223,11 +205,12 @@ MAX_ERROR_RETRIES = 2
 def _reflect(
     question: str,
     sql: str,
-    results: list[dict],
+    results: list[dict] | None = None,
     accumulated_context: str = "",
     conversation_history: str = "",
+    error: str = "",
 ) -> dict:
-    messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=get_table_schema())}]
 
     if accumulated_context:
         messages.append({
@@ -241,66 +224,37 @@ def _reflect(
             "content": f"Recent conversation:\n{conversation_history}",
         })
 
-    preview = json.dumps(results[:10], indent=2, default=str) if results else "0 rows returned."
-    if len(results) > 10:
-        preview += "\n..."
-
-    messages.append({
-        "role": "user",
-        "content": (
-            f"Question: {question}\n"
-            f"Latest SQL: {sql}\n"
-            f"Latest results ({len(results)} rows):\n{preview}"
-        ),
-    })
+    if error:
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Question: {question}\n"
+                f"Query: {sql}\n"
+                f"Database error: {error}"
+            ),
+        })
+    else:
+        preview = json.dumps(results[:10], indent=2, default=str) if results else "0 rows returned."
+        if len(results) > 10:
+            preview += "\n..."
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Question: {question}\n"
+                f"Latest SQL: {sql}\n"
+                f"Latest results ({len(results)} rows):\n{preview}"
+            ),
+        })
 
     try:
         raw = chat(messages)
     except Exception:
+        fallback = error if error else f"Found {len(results)} result(s)."
         return {
             "action": "reply",
-            "content": f"Found {len(results)} result(s).",
+            "content": fallback,
             "raw": "",
         }
-
-    parsed = _parse_agent_response(raw)
-    parsed["raw"] = raw
-    return parsed
-
-
-def _fix_sql(
-    question: str,
-    failed_sql: str,
-    error: str,
-    accumulated_context: str = "",
-    conversation_history: str = "",
-) -> dict:
-    schema = get_table_schema()
-    messages = [
-        {"role": "system", "content": ERROR_RECOVERY_PROMPT.format(schema=schema)},
-        {"role": "user", "content": (
-            f"Original question: {question}\n"
-            f"Failed SQL: {failed_sql}\n"
-            f"Database error: {error}"
-        )},
-    ]
-
-    if accumulated_context:
-        messages.insert(1, {
-            "role": "system",
-            "content": f"Previous queries that worked:\n{accumulated_context}",
-        })
-
-    if conversation_history:
-        messages.insert(1, {
-            "role": "system",
-            "content": f"Recent conversation:\n{conversation_history}",
-        })
-
-    try:
-        raw = chat(messages)
-    except Exception:
-        return {"action": "reply", "content": f"Query error: {error}. Could not recover.", "raw": ""}
 
     parsed = _parse_agent_response(raw)
     parsed["raw"] = raw
@@ -388,10 +342,11 @@ def process_question(
                     "reflections": reflections,
                 }
 
-            parsed = _fix_sql(
-                question, current_sql, str(e),
+            parsed = _reflect(
+                question, current_sql,
                 accumulated_context=accumulated_context,
                 conversation_history=conversation_history,
+                error=str(e),
             )
 
             reflections.append({
@@ -416,9 +371,10 @@ def process_question(
             continue
 
         all_sqls.append(current_sql)
+        error_retries = 0
 
         parsed = _reflect(
-            question, current_sql, results,
+            question, current_sql, results=results,
             accumulated_context=accumulated_context,
             conversation_history=conversation_history,
         )
