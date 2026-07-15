@@ -100,7 +100,7 @@ class DatabaseAgent:
         try:
             leaf_summary = chat(
                 [
-                    {"role": "system", "content": "Summarise the following conversation in 1-2 sentences."},
+                    {"role": "system", "content": "Summarise the following conversation in 2-3 sentences. Preserve all named entities (people, products), specific values (prices, counts, stock levels), and concrete facts. Do not generalize named entities into generic categories."},
                     {"role": "user", "content": conversation_block},
                 ],
                 model_key="format",
@@ -126,7 +126,7 @@ class DatabaseAgent:
             try:
                 block_summary = chat(
                     [
-                        {"role": "system", "content": "Combine these summaries into a single summary of 1-2 sentences."},
+                        {"role": "system", "content": "Combine these summaries into a single summary of 2-3 sentences. Preserve all named entities (people, products), specific values (prices, counts), and concrete facts. Do not generalize named entities into generic categories."},
                         {"role": "user", "content": "\n".join(f"- {t}" for t in texts)},
                     ],
                     model_key="format",
@@ -149,7 +149,7 @@ class DatabaseAgent:
             try:
                 broad_summary = chat(
                     [
-                        {"role": "system", "content": "Combine these into one high-level summary of 1-2 sentences."},
+                        {"role": "system", "content": "Combine these into one high-level summary of 2-3 sentences. Preserve all named entities (people, products), specific values (prices, counts), and concrete facts. Do not generalize named entities into generic categories."},
                         {"role": "user", "content": "\n".join(f"- {t}" for t in texts)},
                     ],
                     model_key="format",
