@@ -76,6 +76,8 @@ class DatabaseAgent:
             for i, ref in enumerate(reflections, 1):
                 if ref.get("raw"):
                     print(f"  [Reflection {i}] {ref['raw'].strip()}")
+                if ref.get("error"):
+                    print(f"  [Error {i}] {ref['error']}")
                 if ref.get("sql"):
                     print(f"  [SQL {i}] {ref['sql']}")
             print()

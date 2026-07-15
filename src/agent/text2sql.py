@@ -77,6 +77,27 @@ Rules:
 - Use conversation history and previous queries to resolve pronouns and follow-ups
 - Think step by step. Start your reasoning with THINK: then decide. Your full reasoning is shown to the user so be clear and traceable."""
 
+ERROR_RECOVERY_PROMPT = """Your SQL query failed with a database error. Fix the column names, table names, or syntax and try again.
+
+Schema:
+{schema}
+
+If you can fix the query, output:
+TOOL
+```sql
+SELECT ...
+```
+
+If you cannot fix it, explain the issue to the user:
+REPLY
+Your explanation here
+
+Rules:
+- Check column and table names carefully against the schema above
+- Look at the error message closely — it often tells you the exact column or table that is wrong
+- Output only one SQL query at a time
+- Think step by step. Start with THINK: then decide."""
+
 # Tokens that are NEVER allowed in any position
 FORBIDDEN_TOKENS = [
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
@@ -196,6 +217,7 @@ def _parse_agent_response(raw: str) -> dict:
 
 
 MAX_ITERATIONS = 5
+MAX_ERROR_RETRIES = 2
 
 
 def _reflect(
@@ -240,6 +262,45 @@ def _reflect(
             "content": f"Found {len(results)} result(s).",
             "raw": "",
         }
+
+    parsed = _parse_agent_response(raw)
+    parsed["raw"] = raw
+    return parsed
+
+
+def _fix_sql(
+    question: str,
+    failed_sql: str,
+    error: str,
+    accumulated_context: str = "",
+    conversation_history: str = "",
+) -> dict:
+    schema = get_table_schema()
+    messages = [
+        {"role": "system", "content": ERROR_RECOVERY_PROMPT.format(schema=schema)},
+        {"role": "user", "content": (
+            f"Original question: {question}\n"
+            f"Failed SQL: {failed_sql}\n"
+            f"Database error: {error}"
+        )},
+    ]
+
+    if accumulated_context:
+        messages.insert(1, {
+            "role": "system",
+            "content": f"Previous queries that worked:\n{accumulated_context}",
+        })
+
+    if conversation_history:
+        messages.insert(1, {
+            "role": "system",
+            "content": f"Recent conversation:\n{conversation_history}",
+        })
+
+    try:
+        raw = chat(messages)
+    except Exception:
+        return {"action": "reply", "content": f"Query error: {error}. Could not recover.", "raw": ""}
 
     parsed = _parse_agent_response(raw)
     parsed["raw"] = raw
@@ -292,6 +353,7 @@ def process_question(
     all_sqls = []
     reflections = []
     current_sql = parsed["content"]
+    error_retries = 0
 
     for attempt in range(MAX_ITERATIONS):
         if not current_sql:
@@ -316,13 +378,42 @@ def process_question(
         try:
             results = execute_sql(current_sql)
         except Exception as e:
-            return {
-                "success": False,
+            error_retries += 1
+            if error_retries > MAX_ERROR_RETRIES:
+                return {
+                    "success": False,
+                    "sql": current_sql,
+                    "answer": f"Query error after {MAX_ERROR_RETRIES} fix attempts: {e}\n\n---\n*SQL attempted:* `{current_sql}`",
+                    "action": "tool",
+                    "reflections": reflections,
+                }
+
+            parsed = _fix_sql(
+                question, current_sql, str(e),
+                accumulated_context=accumulated_context,
+                conversation_history=conversation_history,
+            )
+
+            reflections.append({
                 "sql": current_sql,
-                "answer": f"Query error: {e}\n\n---\n*SQL attempted:* `{current_sql}`",
-                "action": "tool",
-                "reflections": reflections,
-            }
+                "raw": parsed.get("raw", ""),
+                "action": parsed["action"],
+                "error": str(e),
+            })
+
+            if parsed["action"] == "reply":
+                audit = _build_audit_trail(all_sqls)
+                answer = f"{parsed['content']}\n\n---\n*SQL queries used:*\n{audit}"
+                return {
+                    "success": False,
+                    "sql": current_sql,
+                    "answer": answer,
+                    "action": "tool",
+                    "reflections": reflections,
+                }
+
+            current_sql = parsed["content"]
+            continue
 
         all_sqls.append(current_sql)
 
