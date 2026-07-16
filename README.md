@@ -50,6 +50,57 @@ User Input
 └──────────────────────────────┘
 ```
 
+## How Tool Calling Works
+
+The agent uses **native API-level function calling** (not text parsing) for Gemma 4:
+
+```
+LLM prompt (text):
+  "How many customers?"
+
+API metadata (tools=):
+  query_database(sql: string) → JSON rows
+
+LLM response:
+  finish_reason = "tool_calls"
+  message.tool_calls = [
+    { name: "query_database", args: { sql: "SELECT count(*) FROM customers" } }
+  ]
+
+  ↓
+
+System parses tool_calls → validates SQL → executes → feeds results back
+
+LLM reflection prompt (text):
+  "Results: [{'count': 6}] — enough data or need more?"
+
+API metadata (tools=):
+  query_database(sql: string) → JSON rows
+
+LLM response:
+  finish_reason = "stop"
+  message.content = "There are 6 customers."
+```
+
+### Key differences from text-parsing agents
+
+| Aspect | Text parsing (our v0.12) | Native tool calling (v0.13+) |
+|--------|--------------------------|-----------------------------|
+| How tool is detected | Regex on `TOOL`/`REPLY` prefixes | `message.tool_calls` struct from API |
+| Output format | Free text + code blocks | Structured JSON with typed arguments |
+| Multiple tools | Ambiguous prefixes | Model selects by `name` |
+| Fallback | Regex tries best guess | Falls back to text parsing if no `tool_calls` |
+| Compatibility | Any model | Models with native tool support |
+
+### Fallback chain
+
+When `tools` are passed to `chat()`, the function returns the full `Message` object. The `_parse_response_from_msg()` function:
+
+1. **If `tool_calls` present** — extracts the first `query_database` call, parses the `sql` argument from JSON
+2. **If no `tool_calls`** — falls back to the text-based `_parse_agent_response()` with `TOOL`/`REPLY` prefix parsing
+
+This means the system works with both native-tool models (Gemma 4) and text-only models (Llama 3.2), handling gracefully in the fallback chain.
+
 ## Project Structure
 
 ```
@@ -77,8 +128,8 @@ poc-agent-db/
 ```
 
 **Two-model split:**
-- **Gemma (31B):** Agent decision (REPLY vs TOOL), SQL generation, result reflection
-- **Llama 3.2 (3B):** Hierarchical memory summarization only (leafs, blocks, broads)
+- **Gemma (31B):** Agent decision (tool call vs direct reply), SQL generation, result reflection — uses native function calling via API `tools` parameter
+- **Llama 3.2 (3B):** Hierarchical memory summarization only (leafs, blocks, broads) — uses text prompt, no tool calling
 
 ## Quick Start
 
