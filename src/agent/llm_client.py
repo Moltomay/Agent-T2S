@@ -27,7 +27,8 @@ def get_client() -> OpenAI:
     )
 
 
-def chat(messages: list[dict], model: str | None = None, model_key: str | None = None) -> str:
+def chat(messages: list[dict], model: str | None = None, model_key: str | None = None,
+         tools: list[dict] | None = None) -> str:
     client = get_client()
     if model_key == "format":
         primary = model or LLM_FORMAT_MODEL
@@ -43,9 +44,13 @@ def chat(messages: list[dict], model: str | None = None, model_key: str | None =
             response = client.chat.completions.create(
                 model=attempt_model,
                 messages=messages,
+                tools=tools,
                 temperature=0.1,
             )
-            return response.choices[0].message.content or ""
+            msg = response.choices[0].message
+            if tools:
+                return msg
+            return msg.content or ""
         except RateLimitError as e:
             last_error = e
             continue

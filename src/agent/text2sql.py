@@ -198,6 +198,24 @@ def _parse_agent_response(raw: str) -> dict:
     return {"action": "reply", "content": stripped}
 
 
+QUERY_DATABASE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "query_database",
+        "description": "Execute a PostgreSQL SELECT query against the database. Tables: customers, orders, order_items, products.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The SELECT SQL query to execute",
+                }
+            },
+            "required": ["sql"],
+        },
+    },
+}
+
 MAX_ITERATIONS = 5
 MAX_ERROR_RETRIES = 2
 
@@ -247,18 +265,44 @@ def _reflect(
         })
 
     try:
-        raw = chat(messages)
+        msg = chat(messages, tools=[QUERY_DATABASE_TOOL])
     except Exception:
         fallback = error if error else f"Found {len(results)} result(s)."
-        return {
-            "action": "reply",
-            "content": fallback,
-            "raw": "",
-        }
+        return {"action": "reply", "content": fallback, "raw": ""}
 
-    parsed = _parse_agent_response(raw)
-    parsed["raw"] = raw
-    return parsed
+    return _parse_response_from_msg(msg)
+
+
+def _msg_raw(msg) -> str:
+    """Concatenate content + tool_calls for the raw trace."""
+    parts = []
+    if msg.content:
+        parts.append(msg.content.strip())
+    if msg.tool_calls:
+        for tc in msg.tool_calls:
+            parts.append(f"{tc.function.name}({tc.function.arguments})")
+    return "\n".join(parts)
+
+
+def _parse_response_from_msg(msg) -> dict:
+    raw = _msg_raw(msg)
+    if msg.tool_calls:
+        for tc in msg.tool_calls:
+            if tc.function.name == "query_database":
+                try:
+                    args = json.loads(tc.function.arguments)
+                    sql = args.get("sql", "").rstrip(";")
+                    if sql:
+                        return {"action": "tool", "content": sql, "raw": raw}
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    content = (msg.content or "").strip()
+    if content:
+        parsed = _parse_agent_response(content)
+        parsed["raw"] = raw
+        return parsed
+    return {"action": "reply", "content": "", "raw": raw}
 
 
 def _build_audit_trail(all_sqls: list[str]) -> str:
@@ -292,8 +336,8 @@ def process_question(
         })
 
     messages.append({"role": "user", "content": question})
-    raw = chat(messages)
-    parsed = _parse_agent_response(raw)
+    msg = chat(messages, tools=[QUERY_DATABASE_TOOL])
+    parsed = _parse_response_from_msg(msg)
 
     if parsed["action"] == "reply":
         return {
