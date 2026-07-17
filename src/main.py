@@ -6,10 +6,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-USER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".user_id")
+OLD_USER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".user_id")
+USER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", ".user_id")
 
 
 def _load_user_id() -> str:
+    # Migrate from old (wrong) path if it exists
+    try:
+        if os.path.exists(OLD_USER_ID_FILE):
+            with open(OLD_USER_ID_FILE) as f:
+                uid = f.read().strip()
+                if uid:
+                    with open(USER_ID_FILE, "w") as f2:
+                        f2.write(uid)
+                    os.remove(OLD_USER_ID_FILE)
+                    return uid
+    except Exception:
+        pass
+
     try:
         if os.path.exists(USER_ID_FILE):
             with open(USER_ID_FILE) as f:
@@ -84,6 +98,19 @@ def _pick_session(user_id: str) -> str | None:
     return None
 
 
+def _backfill_user_id(user_id: str):
+    from src.memory.long_term import LongTermMemory
+    from sqlalchemy import text
+
+    long_term = LongTermMemory()
+    with long_term.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE agent_memory SET user_id = :uid WHERE user_id IS NULL"),
+            {"uid": user_id},
+        )
+    long_term.close()
+
+
 def main():
     from src.db.seed import seed_database
     from src.agent.agent import DatabaseAgent
@@ -93,6 +120,7 @@ def main():
     print("Database ready.")
 
     user_id = _load_user_id()
+    _backfill_user_id(user_id)
     display_name = _ensure_display_name(user_id)
     session_id = _pick_session(user_id)
     agent = DatabaseAgent(session_id=session_id, user_id=user_id)
