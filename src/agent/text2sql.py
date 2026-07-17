@@ -427,20 +427,22 @@ def process_question(
     parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
 
     if parsed["action"] == "reply":
-        if not parsed.get("content") and parsed.get("had_fact_ops"):
-            parsed = _reflect(question, "",
-                              user_id=user_id, user_facts_memory=user_facts_memory)
+        content = parsed.get("content", "")
+        if content:
+            return {"success": True, "sql": "", "answer": content, "action": "reply"}
+        if parsed.get("had_fact_ops"):
+            msg = chat(
+                [
+                    {"role": "system", "content": "The user just shared personal information that was stored. Reply concisely acknowledging it. If the user asked something that needs a database query, use the available tools."},
+                    {"role": "user", "content": question},
+                ],
+                tools=ALL_TOOLS,
+            )
+            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
             if parsed["action"] == "reply":
-                return {
-                    "success": True, "sql": "", "answer": parsed["content"], "action": "reply",
-                }
+                return {"success": True, "sql": "", "answer": parsed["content"], "action": "reply"}
         else:
-            return {
-                "success": True,
-                "sql": "",
-                "answer": parsed["content"],
-                "action": "reply",
-            }
+            return {"success": True, "sql": "", "answer": "I see. How can I help you?", "action": "reply"}
 
     for attempt in range(MAX_ITERATIONS):
         tool_name = parsed.get("tool_name", "query_database")
@@ -451,9 +453,14 @@ def process_question(
             value = parsed["content"]["value"]
             stored = user_facts_memory.set_fact(user_id, key, value) if user_id and user_facts_memory else False
             accumulated_context += f"\n[Fact] stored '{key}' = '{value}'\n" if stored else f"\n[Fact] limit reached, '{key}' not stored\n"
-            parsed = _reflect(question, "", accumulated_context=accumulated_context,
-                              conversation_history=conversation_history,
-                              user_id=user_id, user_facts_memory=user_facts_memory)
+            msg = chat(
+                [
+                    {"role": "system", "content": "A fact about the user was just stored. Reply naturally acknowledging it if needed, or continue with the task."},
+                    {"role": "user", "content": question},
+                ],
+                tools=ALL_TOOLS,
+            )
+            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
@@ -466,9 +473,14 @@ def process_question(
             key = parsed["content"]["key"]
             deleted = user_facts_memory.delete_fact(user_id, key) if user_id and user_facts_memory else False
             accumulated_context += f"\n[Fact] deleted '{key}'\n" if deleted else f"\n[Fact] '{key}' not found\n"
-            parsed = _reflect(question, "", accumulated_context=accumulated_context,
-                              conversation_history=conversation_history,
-                              user_id=user_id, user_facts_memory=user_facts_memory)
+            msg = chat(
+                [
+                    {"role": "system", "content": "A fact about the user was just deleted. Reply naturally acknowledging it if needed, or continue with the task."},
+                    {"role": "user", "content": question},
+                ],
+                tools=ALL_TOOLS,
+            )
+            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],

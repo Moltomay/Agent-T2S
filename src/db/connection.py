@@ -55,5 +55,7 @@ def get_table_schema() -> str:
 
         schema_str = ""
         for tname, cols in tables.items():
+            if tname in ("agent_memory", "user_facts"):
+                continue
             schema_str += f"Table: {tname}\n" + "\n".join(cols) + "\n\n"
         return schema_str.strip()
