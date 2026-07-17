@@ -21,6 +21,7 @@ env/
 
 # Session
 .session_id
+.user_id
 
 # Notes
 todo.txt

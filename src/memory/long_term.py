@@ -13,6 +13,7 @@ class MemoryEntry(MemoryBase):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(100), nullable=False, index=True)
+    user_id = Column(String(100), nullable=True, index=True)
     summary = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     turn_count = Column(Integer, default=0)
@@ -42,11 +43,16 @@ class LongTermMemory:
             conn.execute(
                 text("ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS turn_start INTEGER DEFAULT 0")
             )
+            conn.execute(
+                text("ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS user_id VARCHAR(100)")
+            )
 
     def store(self, session_id: str, summary: str, turn_count: int,
-              level: int = 1, turn_start: int | None = None) -> int:
+              level: int = 1, turn_start: int | None = None,
+              user_id: str | None = None) -> int:
         entry = MemoryEntry(
             session_id=session_id,
+            user_id=user_id,
             summary=summary,
             turn_count=turn_count,
             level=level,
@@ -72,19 +78,18 @@ class LongTermMemory:
         ).update({"is_active": False})
         self.session.commit()
 
-    def get_available_sessions(self) -> list[dict]:
-        rows = (
-            self.session.query(
-                MemoryEntry.session_id,
-                sa_func.max(MemoryEntry.turn_count).label("turn_count"),
-                sa_func.count(MemoryEntry.id).label("summary_count"),
-                sa_func.max(MemoryEntry.created_at).label("last_activity"),
-            )
-            .filter(MemoryEntry.is_active == True)
-            .group_by(MemoryEntry.session_id)
-            .order_by(sa_func.max(MemoryEntry.created_at).desc())
-            .all()
-        )
+    def get_available_sessions(self, user_id: str | None = None) -> list[dict]:
+        query = self.session.query(
+            MemoryEntry.session_id,
+            sa_func.max(MemoryEntry.turn_count).label("turn_count"),
+            sa_func.count(MemoryEntry.id).label("summary_count"),
+            sa_func.max(MemoryEntry.created_at).label("last_activity"),
+        ).filter(MemoryEntry.is_active == True)
+        if user_id:
+            query = query.filter(MemoryEntry.user_id == user_id)
+        rows = query.group_by(MemoryEntry.session_id).order_by(
+            sa_func.max(MemoryEntry.created_at).desc()
+        ).all()
         return [
             {
                 "session_id": r.session_id,

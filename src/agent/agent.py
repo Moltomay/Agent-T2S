@@ -5,6 +5,7 @@ from src.agent.text2sql import process_question
 from src.agent.llm_client import chat
 from src.memory.short_term import ShortTermMemory
 from src.memory.long_term import LongTermMemory
+from src.memory.user_facts import UserFactsMemory
 
 
 SESSION_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".session_id")
@@ -37,14 +38,16 @@ def _generate_session_id() -> str:
 
 
 class DatabaseAgent:
-    def __init__(self, session_id: str | None = None):
+    def __init__(self, session_id: str | None = None, user_id: str | None = None):
         if session_id:
             self.session_id = session_id
             _save_session_id(session_id)
         else:
             self.session_id = _generate_session_id()
+        self.user_id = user_id
         self.short_term = ShortTermMemory(max_turns=10)
         self.long_term = LongTermMemory()
+        self.user_facts = UserFactsMemory() if user_id else None
         self.turn_count = 0
         self._cached_context = ""
 
@@ -66,6 +69,8 @@ class DatabaseAgent:
             user_message,
             long_term_context=long_context,
             conversation_history=conv_history,
+            user_id=self.user_id,
+            user_facts_memory=self.user_facts,
         )
 
         answer = result.get("answer", "Error: no response from agent.")
@@ -111,6 +116,7 @@ class DatabaseAgent:
         self.long_term.store(
             self.session_id, leaf_summary, self.turn_count,
             level=1, turn_start=turn_start,
+            user_id=self.user_id,
         )
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -137,6 +143,7 @@ class DatabaseAgent:
             self.long_term.store(
                 self.session_id, block_summary, batch[-1].turn_count,
                 level=2, turn_start=batch[0].turn_start,
+                user_id=self.user_id,
             )
             self.long_term.mark_inactive(child_ids)
             did_rollup = True
@@ -160,6 +167,7 @@ class DatabaseAgent:
             self.long_term.store(
                 self.session_id, broad_summary, batch[-1].turn_count,
                 level=3, turn_start=batch[0].turn_start,
+                user_id=self.user_id,
             )
             self.long_term.mark_inactive(child_ids)
             did_rollup = True

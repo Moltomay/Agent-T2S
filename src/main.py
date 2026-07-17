@@ -1,25 +1,63 @@
 import sys
 import os
+import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from dotenv import load_dotenv
 
 load_dotenv()
 
+USER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".user_id")
+
+
+def _load_user_id() -> str:
+    try:
+        if os.path.exists(USER_ID_FILE):
+            with open(USER_ID_FILE) as f:
+                uid = f.read().strip()
+                if uid:
+                    return uid
+    except Exception:
+        pass
+    uid = str(uuid.uuid4())
+    try:
+        with open(USER_ID_FILE, "w") as f:
+            f.write(uid)
+    except Exception:
+        pass
+    return uid
+
+
+def _ensure_display_name(user_id: str) -> str:
+    from src.memory.user_facts import UserFactsMemory
+
+    facts = UserFactsMemory()
+    existing = facts.get_facts(user_id)
+    if "name" in existing:
+        return existing["name"]
+    print("\n" + "=" * 60)
+    name = input("  Welcome! What's your name? ").strip()
+    if name:
+        facts.set_fact(user_id, "name", name)
+    else:
+        name = "User"
+    facts.close()
+    return name
+
 
 def print_banner():
     print("=" * 60)
-    print("  Database Agent PoC — Text-to-SQL + Long/Short-Term Memory")
+    print("  Database Agent PoC — Text-to-SQL + Memory")
     print("=" * 60)
     print("  Commands:  /exit  quit  |  /history  show conversation")
     print("             /memory   show long-term summaries")
     print("=" * 60)
 
 
-def _pick_session() -> str | None:
+def _pick_session(user_id: str) -> str | None:
     from src.memory.long_term import LongTermMemory
 
     long_term = LongTermMemory()
-    sessions = long_term.get_available_sessions()
+    sessions = long_term.get_available_sessions(user_id=user_id)
     long_term.close()
 
     if not sessions:
@@ -54,18 +92,20 @@ def main():
     seed_database()
     print("Database ready.")
 
-    session_id = _pick_session()
-    agent = DatabaseAgent(session_id=session_id)
+    user_id = _load_user_id()
+    display_name = _ensure_display_name(user_id)
+    session_id = _pick_session(user_id)
+    agent = DatabaseAgent(session_id=session_id, user_id=user_id)
     if session_id:
-        print(f"Continuing session: {agent.session_id}\n")
+        print(f"\n  Welcome back, {display_name}! Continuing session: {agent.session_id}\n")
     else:
-        print(f"New session: {agent.session_id}\n")
+        print(f"\n  Hello, {display_name}! New session: {agent.session_id}\n")
 
     print_banner()
 
     while True:
         try:
-            user_input = input("\nYou: ").strip()
+            user_input = input(f"\n{display_name}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break

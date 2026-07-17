@@ -78,7 +78,10 @@ Rules:
 - Use conversation history and previous queries to resolve pronouns and follow-ups
 - Check column and table names carefully against the schema above
 - Look at the error message closely — it often tells you the exact column or table that is wrong
-- Think step by step. Start your reasoning with THINK: then decide. Your full reasoning is shown to the user so be clear and traceable."""
+- Think step by step. Start your reasoning with THINK: then decide. Your full reasoning is shown to the user so be clear and traceable.
+
+### Implicit fact detection
+If you notice the user repeatedly filtering by the same value (e.g., same country, same category) across multiple turns, call store_fact to remember their preference. For example: if they ask about orders in France in two separate questions, store_fact("preferred_country", "France"). Do not mention this to the user — just silently store it."""
 
 # Tokens that are NEVER allowed in any position
 FORBIDDEN_TOKENS = [
@@ -216,6 +219,48 @@ QUERY_DATABASE_TOOL = {
     },
 }
 
+STORE_FACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "store_fact",
+        "description": "Remember a fact about this user (e.g. preferred country, name, favorite product). Call this both on explicit 'remember this' requests AND when you notice a repeated preference across multiple turns.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Fact label (e.g. 'preferred_country', 'name', 'favorite_category')",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Fact value (e.g. 'France', 'Hamza', 'Electronics')",
+                },
+            },
+            "required": ["key", "value"],
+        },
+    },
+}
+
+DELETE_FACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "delete_fact",
+        "description": "Delete a fact previously stored about this user.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "The fact key to delete (e.g. 'preferred_country')",
+                },
+            },
+            "required": ["key"],
+        },
+    },
+}
+
+ALL_TOOLS = [QUERY_DATABASE_TOOL, STORE_FACT_TOOL, DELETE_FACT_TOOL]
+
 MAX_ITERATIONS = 5
 MAX_ERROR_RETRIES = 2
 
@@ -265,7 +310,7 @@ def _reflect(
         })
 
     try:
-        msg = chat(messages, tools=[QUERY_DATABASE_TOOL])
+        msg = chat(messages, tools=ALL_TOOLS)
     except Exception:
         fallback = error if error else f"Found {len(results)} result(s)."
         return {"action": "reply", "content": fallback, "raw": ""}
@@ -288,14 +333,25 @@ def _parse_response_from_msg(msg) -> dict:
     raw = _msg_raw(msg)
     if msg.tool_calls:
         for tc in msg.tool_calls:
-            if tc.function.name == "query_database":
-                try:
-                    args = json.loads(tc.function.arguments)
-                    sql = args.get("sql", "").rstrip(";")
-                    if sql:
-                        return {"action": "tool", "content": sql, "raw": raw}
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if name == "query_database":
+                sql = args.get("sql", "").rstrip(";")
+                if sql:
+                    return {"action": "tool", "tool_name": "query_database", "content": sql, "raw": raw}
+            elif name == "store_fact":
+                key = args.get("key", "")
+                value = args.get("value", "")
+                if key and value:
+                    return {"action": "tool", "tool_name": "store_fact", "content": {"key": key, "value": value}, "raw": raw}
+            elif name == "delete_fact":
+                key = args.get("key", "")
+                if key:
+                    return {"action": "tool", "tool_name": "delete_fact", "content": {"key": key}, "raw": raw}
 
     content = (msg.content or "").strip()
     if content:
@@ -318,6 +374,8 @@ def process_question(
     question: str,
     long_term_context: str = "",
     conversation_history: str = "",
+    user_id: str | None = None,
+    user_facts_memory=None,
 ) -> dict:
     schema = get_table_schema()
     system_prompt = AGENT_SYSTEM_PROMPT.format(schema=schema)
@@ -335,8 +393,13 @@ def process_question(
             "content": long_term_context,
         })
 
+    if user_id and user_facts_memory:
+        facts_str = user_facts_memory.format_facts(user_id)
+        if facts_str:
+            messages.append({"role": "system", "content": facts_str})
+
     messages.append({"role": "user", "content": question})
-    msg = chat(messages, tools=[QUERY_DATABASE_TOOL])
+    msg = chat(messages, tools=ALL_TOOLS)
     parsed = _parse_response_from_msg(msg)
 
     if parsed["action"] == "reply":
@@ -350,27 +413,57 @@ def process_question(
     accumulated_context = ""
     all_sqls = []
     reflections = []
-    current_sql = parsed["content"]
+    current_sql = ""
     error_retries = 0
 
     for attempt in range(MAX_ITERATIONS):
+        tool_name = parsed.get("tool_name", "query_database")
+
+        # --- store_fact ---
+        if tool_name == "store_fact":
+            key = parsed["content"]["key"]
+            value = parsed["content"]["value"]
+            stored = user_facts_memory.set_fact(user_id, key, value) if user_id and user_facts_memory else False
+            result_msg = f"[Fact] stored '{key}' = '{value}'" if stored else f"[Fact] limit reached (11/11), '{key}' not stored"
+            accumulated_context += f"\n{result_msg}\n"
+            parsed = _reflect(question, "", accumulated_context=accumulated_context,
+                              conversation_history=conversation_history)
+            if parsed["action"] == "reply":
+                return {
+                    "success": True, "sql": "", "answer": parsed["content"],
+                    "action": "reply", "reflections": reflections,
+                }
+            continue
+
+        # --- delete_fact ---
+        if tool_name == "delete_fact":
+            key = parsed["content"]["key"]
+            deleted = user_facts_memory.delete_fact(user_id, key) if user_id and user_facts_memory else False
+            result_msg = f"[Fact] deleted '{key}'" if deleted else f"[Fact] '{key}' not found"
+            accumulated_context += f"\n{result_msg}\n"
+            parsed = _reflect(question, "", accumulated_context=accumulated_context,
+                              conversation_history=conversation_history)
+            if parsed["action"] == "reply":
+                return {
+                    "success": True, "sql": "", "answer": parsed["content"],
+                    "action": "reply", "reflections": reflections,
+                }
+            continue
+
+        # --- query_database ---
+        current_sql = parsed["content"]
         if not current_sql:
             return {
-                "success": False,
-                "sql": "",
-                "answer": "Could not generate a valid SQL query.",
-                "action": "tool",
-                "reflections": reflections,
+                "success": False, "sql": "", "answer": "Could not generate a valid SQL query.",
+                "action": "tool", "reflections": reflections,
             }
 
         is_safe, reason = validate_sql(current_sql)
         if not is_safe:
             return {
-                "success": False,
-                "sql": current_sql,
+                "success": False, "sql": current_sql,
                 "answer": f"Query blocked by guardrail: {reason}\n\n---\n*SQL attempted:* `{current_sql}`",
-                "action": "tool",
-                "reflections": reflections,
+                "action": "tool", "reflections": reflections,
             }
 
         try:
@@ -379,11 +472,9 @@ def process_question(
             error_retries += 1
             if error_retries > MAX_ERROR_RETRIES:
                 return {
-                    "success": False,
-                    "sql": current_sql,
+                    "success": False, "sql": current_sql,
                     "answer": f"Query error after {MAX_ERROR_RETRIES} fix attempts: {e}\n\n---\n*SQL attempted:* `{current_sql}`",
-                    "action": "tool",
-                    "reflections": reflections,
+                    "action": "tool", "reflections": reflections,
                 }
 
             parsed = _reflect(
@@ -402,13 +493,10 @@ def process_question(
 
             if parsed["action"] == "reply":
                 audit = _build_audit_trail(all_sqls)
-                answer = f"{parsed['content']}\n\n---\n*SQL queries used:*\n{audit}"
                 return {
-                    "success": False,
-                    "sql": current_sql,
-                    "answer": answer,
-                    "action": "tool",
-                    "reflections": reflections,
+                    "success": False, "sql": current_sql,
+                    "answer": f"{parsed['content']}\n\n---\n*SQL queries used:*\n{audit}",
+                    "action": "tool", "reflections": reflections,
                 }
 
             current_sql = parsed["content"]
@@ -431,13 +519,10 @@ def process_question(
 
         if parsed["action"] == "reply":
             audit = _build_audit_trail(all_sqls)
-            answer = f"{parsed['content']}\n\n---\n*SQL queries used:*\n{audit}"
             return {
-                "success": True,
-                "sql": current_sql,
-                "answer": answer,
-                "action": "tool",
-                "reflections": reflections,
+                "success": True, "sql": current_sql,
+                "answer": f"{parsed['content']}\n\n---\n*SQL queries used:*\n{audit}",
+                "action": "tool", "reflections": reflections,
             }
 
         preview = json.dumps(results[:5], indent=2, default=str) if results else "0 rows returned."
@@ -450,9 +535,7 @@ def process_question(
 
     audit = _build_audit_trail(all_sqls)
     return {
-        "success": False,
-        "sql": current_sql,
+        "success": False, "sql": current_sql,
         "answer": f"Reached maximum iterations ({MAX_ITERATIONS}).\n\n---\n*SQL queries used:*\n{audit}",
-        "action": "tool",
-        "reflections": reflections,
+        "action": "tool", "reflections": reflections,
     }
