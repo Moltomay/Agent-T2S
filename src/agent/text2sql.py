@@ -7,12 +7,19 @@ from src.db.connection import get_table_schema, execute_sql
 
 AGENT_SYSTEM_PROMPT = """You are an agent with access to a PostgreSQL database tool.
 
-## Tool: query_database(sql) -> JSON
+## Tools
 
-Use this when the user asks about customers, orders, products, pricing, or any data in the database.
+### query_database(sql: string) -> JSON
+When the user asks about customers, orders, products, pricing, or any data in the database.
 
 Schema:
 {schema}
+
+### store_fact(key: string, value: string)
+Remember a fact about this user. Call this on explicit "remember this" requests AND when you notice a repeated preference. Key examples: 'name', 'age', 'preferred_country', 'preferred_currency', 'favorite_category'.
+
+### delete_fact(key: string)
+Delete a fact previously stored about this user.
 
 ## Planning (important)
 Before writing any SQL, think about what data you need. For simple questions like "how many customers?" a single query is enough. For complex questions, start with a broad exploratory query to see available data, then refine with follow-up queries. It is better to do multiple small SQL steps than one complex query.
@@ -272,6 +279,8 @@ def _reflect(
     accumulated_context: str = "",
     conversation_history: str = "",
     error: str = "",
+    user_id: str | None = None,
+    user_facts_memory=None,
 ) -> dict:
     messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=get_table_schema())}]
 
@@ -297,25 +306,28 @@ def _reflect(
             ),
         })
     else:
-        preview = json.dumps(results[:10], indent=2, default=str) if results else "0 rows returned."
-        if len(results) > 10:
-            preview += "\n..."
+        if results:
+            preview = json.dumps(results[:10], indent=2, default=str)
+            if len(results) > 10:
+                preview += "\n..."
+        else:
+            preview = None
         messages.append({
             "role": "user",
             "content": (
                 f"Question: {question}\n"
                 f"Latest SQL: {sql}\n"
-                f"Latest results ({len(results)} rows):\n{preview}"
+                f"Latest results ({len(results) if results else 0} rows):\n{preview or '0 rows returned.'}"
             ),
         })
 
     try:
         msg = chat(messages, tools=ALL_TOOLS)
     except Exception:
-        fallback = error if error else f"Found {len(results)} result(s)."
+        fallback = error if error else f"Found {len(results) if results else 0} result(s)."
         return {"action": "reply", "content": fallback, "raw": ""}
 
-    return _parse_response_from_msg(msg)
+    return _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
 
 
 def _msg_raw(msg) -> str:
@@ -329,9 +341,13 @@ def _msg_raw(msg) -> str:
     return "\n".join(parts)
 
 
-def _parse_response_from_msg(msg) -> dict:
+def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=None) -> dict:
+    """Parse LLM response. If user_facts_memory is provided, executes store_fact/delete_fact
+    ops inline and returns only the first query_database or reply action."""
     raw = _msg_raw(msg)
+    had_fact_ops = False
     if msg.tool_calls:
+        query_tc = None
         for tc in msg.tool_calls:
             name = tc.function.name
             try:
@@ -339,26 +355,34 @@ def _parse_response_from_msg(msg) -> dict:
             except (json.JSONDecodeError, TypeError):
                 continue
 
-            if name == "query_database":
-                sql = args.get("sql", "").rstrip(";")
-                if sql:
-                    return {"action": "tool", "tool_name": "query_database", "content": sql, "raw": raw}
-            elif name == "store_fact":
-                key = args.get("key", "")
-                value = args.get("value", "")
+            if name == "query_database" and not query_tc:
+                query_tc = tc
+            elif name == "store_fact" and user_id and user_facts_memory:
+                key, value = args.get("key", ""), args.get("value", "")
                 if key and value:
-                    return {"action": "tool", "tool_name": "store_fact", "content": {"key": key, "value": value}, "raw": raw}
-            elif name == "delete_fact":
+                    user_facts_memory.set_fact(user_id, key, value)
+                    had_fact_ops = True
+            elif name == "delete_fact" and user_id and user_facts_memory:
                 key = args.get("key", "")
                 if key:
-                    return {"action": "tool", "tool_name": "delete_fact", "content": {"key": key}, "raw": raw}
+                    user_facts_memory.delete_fact(user_id, key)
+                    had_fact_ops = True
+
+        if query_tc:
+            try:
+                args = json.loads(query_tc.function.arguments)
+                sql = args.get("sql", "").rstrip(";")
+                if sql:
+                    return {"action": "tool", "tool_name": "query_database", "content": sql, "raw": raw, "had_fact_ops": had_fact_ops}
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     content = (msg.content or "").strip()
     if content:
         parsed = _parse_agent_response(content)
         parsed["raw"] = raw
         return parsed
-    return {"action": "reply", "content": "", "raw": raw}
+    return {"action": "reply", "content": "", "raw": raw, "had_fact_ops": had_fact_ops}
 
 
 def _build_audit_trail(all_sqls: list[str]) -> str:
@@ -398,36 +422,45 @@ def process_question(
         if facts_str:
             messages.append({"role": "system", "content": facts_str})
 
-    messages.append({"role": "user", "content": question})
-    msg = chat(messages, tools=ALL_TOOLS)
-    parsed = _parse_response_from_msg(msg)
-
-    if parsed["action"] == "reply":
-        return {
-            "success": True,
-            "sql": "",
-            "answer": parsed["content"],
-            "action": "reply",
-        }
-
     accumulated_context = ""
     all_sqls = []
     reflections = []
     current_sql = ""
     error_retries = 0
 
+    messages.append({"role": "user", "content": question})
+    msg = chat(messages, tools=ALL_TOOLS)
+
+    parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
+
+    if parsed["action"] == "reply":
+        if not parsed.get("content") and parsed.get("had_fact_ops"):
+            parsed = _reflect(question, "",
+                              user_id=user_id, user_facts_memory=user_facts_memory)
+            if parsed["action"] == "reply":
+                return {
+                    "success": True, "sql": "", "answer": parsed["content"], "action": "reply",
+                }
+        else:
+            return {
+                "success": True,
+                "sql": "",
+                "answer": parsed["content"],
+                "action": "reply",
+            }
+
     for attempt in range(MAX_ITERATIONS):
         tool_name = parsed.get("tool_name", "query_database")
 
-        # --- store_fact ---
+        # --- store_fact (from reflection or error recovery) ---
         if tool_name == "store_fact":
             key = parsed["content"]["key"]
             value = parsed["content"]["value"]
             stored = user_facts_memory.set_fact(user_id, key, value) if user_id and user_facts_memory else False
-            result_msg = f"[Fact] stored '{key}' = '{value}'" if stored else f"[Fact] limit reached (11/11), '{key}' not stored"
-            accumulated_context += f"\n{result_msg}\n"
+            accumulated_context += f"\n[Fact] stored '{key}' = '{value}'\n" if stored else f"\n[Fact] limit reached, '{key}' not stored\n"
             parsed = _reflect(question, "", accumulated_context=accumulated_context,
-                              conversation_history=conversation_history)
+                              conversation_history=conversation_history,
+                              user_id=user_id, user_facts_memory=user_facts_memory)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
@@ -435,14 +468,14 @@ def process_question(
                 }
             continue
 
-        # --- delete_fact ---
+        # --- delete_fact (from reflection or error recovery) ---
         if tool_name == "delete_fact":
             key = parsed["content"]["key"]
             deleted = user_facts_memory.delete_fact(user_id, key) if user_id and user_facts_memory else False
-            result_msg = f"[Fact] deleted '{key}'" if deleted else f"[Fact] '{key}' not found"
-            accumulated_context += f"\n{result_msg}\n"
+            accumulated_context += f"\n[Fact] deleted '{key}'\n" if deleted else f"\n[Fact] '{key}' not found\n"
             parsed = _reflect(question, "", accumulated_context=accumulated_context,
-                              conversation_history=conversation_history)
+                              conversation_history=conversation_history,
+                              user_id=user_id, user_facts_memory=user_facts_memory)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
@@ -482,6 +515,7 @@ def process_question(
                 accumulated_context=accumulated_context,
                 conversation_history=conversation_history,
                 error=str(e),
+                user_id=user_id, user_facts_memory=user_facts_memory,
             )
 
             reflections.append({
@@ -509,6 +543,7 @@ def process_question(
             question, current_sql, results=results,
             accumulated_context=accumulated_context,
             conversation_history=conversation_history,
+            user_id=user_id, user_facts_memory=user_facts_memory,
         )
 
         reflections.append({
