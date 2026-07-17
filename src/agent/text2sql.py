@@ -431,16 +431,11 @@ def process_question(
         if content:
             return {"success": True, "sql": "", "answer": content, "action": "reply"}
         if parsed.get("had_fact_ops"):
-            msg = chat(
-                [
-                    {"role": "system", "content": "The user just shared personal information that was stored. Reply concisely acknowledging it. If the user asked something that needs a database query, use the available tools."},
-                    {"role": "user", "content": question},
-                ],
-                tools=ALL_TOOLS,
-            )
-            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
-            if parsed["action"] == "reply":
-                return {"success": True, "sql": "", "answer": parsed["content"], "action": "reply"}
+            msg = chat([
+                {"role": "system", "content": "The user shared personal information which was just stored. Reply acknowledging it concisely in 1 sentence."},
+                {"role": "user", "content": question},
+            ])
+            return {"success": True, "sql": "", "answer": msg or "I've noted that.", "action": "reply"}
         else:
             return {"success": True, "sql": "", "answer": "I see. How can I help you?", "action": "reply"}
 

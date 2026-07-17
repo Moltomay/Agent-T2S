@@ -40,7 +40,9 @@ class UserFactsMemory:
             self.session.add(entry)
         if len(entry.facts) >= MAX_USER_FACTS and key not in entry.facts:
             return False
-        entry.facts[key] = value
+        facts = dict(entry.facts)
+        facts[key] = value
+        entry.facts = facts
         entry.updated_at = datetime.now(timezone.utc)
         self.session.commit()
         return True
@@ -49,7 +51,9 @@ class UserFactsMemory:
         entry = self.session.query(UserFactsEntry).filter_by(user_id=user_id).first()
         if not entry or key not in entry.facts:
             return False
-        del entry.facts[key]
+        facts = dict(entry.facts)
+        facts.pop(key, None)
+        entry.facts = facts
         entry.updated_at = datetime.now(timezone.utc)
         self.session.commit()
         return True
