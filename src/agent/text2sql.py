@@ -7,19 +7,12 @@ from src.db.connection import get_table_schema, execute_sql
 
 AGENT_SYSTEM_PROMPT = """You are an agent with access to a PostgreSQL database tool.
 
-## Tools
+## Tool: query_database(sql) -> JSON
 
-### query_database(sql: string) -> JSON
-When the user asks about customers, orders, products, pricing, or any data in the database.
+Use this when the user asks about customers, orders, products, pricing, or any data in the database.
 
 Schema:
 {schema}
-
-### store_fact(key: string, value: string)
-Remember a fact about this user. Call this on explicit "remember this" requests AND when you notice a repeated preference. Key examples: 'name', 'age', 'preferred_country', 'preferred_currency', 'favorite_category'.
-
-### delete_fact(key: string)
-Delete a fact previously stored about this user.
 
 ## Planning (important)
 Before writing any SQL, think about what data you need. For simple questions like "how many customers?" a single query is enough. For complex questions, start with a broad exploratory query to see available data, then refine with follow-up queries. It is better to do multiple small SQL steps than one complex query.
