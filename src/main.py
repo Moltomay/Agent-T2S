@@ -112,11 +112,8 @@ def _backfill_user_id(user_id: str):
 
 
 def main():
-    from src.db.seed import seed_database
     from src.agent.agent import DatabaseAgent
 
-    print("Initialising database...")
-    seed_database()
     print("Database ready.")
 
     user_id = _load_user_id()

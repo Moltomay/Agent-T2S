@@ -205,7 +205,7 @@ QUERY_DATABASE_TOOL = {
     "type": "function",
     "function": {
         "name": "query_database",
-        "description": "Execute a PostgreSQL SELECT query against the database. Tables: customers, orders, order_items, products.",
+        "description": "Execute a PostgreSQL SELECT query against the PMO platform database. Main tables: projects, users, team_members, partners, categories, project_phases, project_programs, project_statuses, project_status_types, milestones, financial_metrics, project_team_assignments, project_roles, project_partners, notifications, project_temporal_values. History tables (*_history) track changes over time.",
         "parameters": {
             "type": "object",
             "properties": {
