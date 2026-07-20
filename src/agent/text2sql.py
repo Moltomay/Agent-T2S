@@ -1,5 +1,6 @@
 import re
 import json
+import time
 
 from src.agent.llm_client import chat
 from src.db.connection import get_table_schema, execute_sql
@@ -317,8 +318,18 @@ def _reflect(
     try:
         msg = chat(messages, tools=ALL_TOOLS)
     except Exception:
-        fallback = error if error else f"Found {len(results) if results else 0} result(s)."
-        return {"action": "reply", "content": fallback, "raw": ""}
+        try:
+            time.sleep(2)
+            msg = chat(messages, tools=ALL_TOOLS)
+        except Exception:
+            if error:
+                fallback = f"I encountered a database error: {error}"
+            elif results:
+                lines = [", ".join(f"{k}={v}" for k, v in row.items()) for row in results[:5]]
+                fallback = "\n".join(lines) if lines else "No results found."
+            else:
+                fallback = "I was about to process that but hit a temporary issue. Try again?"
+            return {"action": "reply", "content": fallback, "raw": ""}
 
     return _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
 
