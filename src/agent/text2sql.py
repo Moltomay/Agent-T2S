@@ -140,14 +140,14 @@ def validate_sql(sql: str) -> tuple[bool, str]:
         return False, f"Only SELECT queries are allowed. Got '{first}'."
 
     for token in DANGEROUS_AFTER_SELECT:
-        if token in upper_sql:
+        if re.search(rf'(?<!\w){token}(?!\w)', upper_sql):
             return False, f"'{token}' is not allowed in queries."
 
     for token in FORBIDDEN_TOKENS:
-        if token in upper_sql:
+        if re.search(rf'(?<!\w){token}(?!\w)', upper_sql):
             return False, f"'{token}' is not allowed."
 
-    detected_users = [u for u in SYSTEM_USERS if u.upper() in upper_sql]
+    detected_users = [u for u in SYSTEM_USERS if re.search(rf'(?<!\w){u.upper()}(?!\w)', upper_sql)]
     if detected_users:
         return False, f"Query references system user(s): {', '.join(detected_users)}."
 
