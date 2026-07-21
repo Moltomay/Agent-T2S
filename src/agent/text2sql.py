@@ -362,6 +362,8 @@ def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=
             except (json.JSONDecodeError, TypeError):
                 continue
 
+            print(f"  [Tool call] {name}({tc.function.arguments})")
+
             if name == "query_database" and not query_tc:
                 query_tc = tc
             elif name == "store_fact" and user_id and user_facts_memory:
@@ -511,6 +513,8 @@ def process_question(
         if tool_name == "search_memories":
             keyword = parsed.get("keyword", "")
             search_results = parsed["content"]
+            result_count = len([l for l in search_results.split("\n") if l.strip()])
+            print(f"  [Search results] '{keyword}' — {result_count} line(s) found")
             accumulated_context += f"\n[Session search for '{keyword}']:\n{search_results}\n"
             messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory)
             msg = chat(messages, tools=ALL_TOOLS)
