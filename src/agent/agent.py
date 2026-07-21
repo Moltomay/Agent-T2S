@@ -40,7 +40,6 @@ def _generate_session_id() -> str:
 
 class DatabaseAgent:
     def __init__(self, session_id: str | None = None, user_id: str | None = None):
-        resumed = bool(session_id)
         if session_id:
             self.session_id = session_id
             _save_session_id(session_id)
@@ -52,13 +51,6 @@ class DatabaseAgent:
         self.user_facts = UserFactsMemory() if user_id else None
         self.turn_count = 0
         self._cached_context = ""
-
-        if resumed:
-            recent = session_log.load_recent_turns(self.session_id, n=6)
-            for entry in recent:
-                self.short_term.add(entry["role"], entry["content"])
-                if entry["role"] == "user":
-                    self.turn_count += 1
 
     def _load_cached_context(self) -> str:
         self._cached_context = self.long_term.get_summary_context(self.session_id)
