@@ -6,6 +6,7 @@ from src.agent.llm_client import chat
 from src.memory.short_term import ShortTermMemory
 from src.memory.long_term import LongTermMemory
 from src.memory.user_facts import UserFactsMemory
+from src.memory import session_log
 
 
 SESSION_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".session_id")
@@ -39,6 +40,7 @@ def _generate_session_id() -> str:
 
 class DatabaseAgent:
     def __init__(self, session_id: str | None = None, user_id: str | None = None):
+        resumed = bool(session_id)
         if session_id:
             self.session_id = session_id
             _save_session_id(session_id)
@@ -51,6 +53,13 @@ class DatabaseAgent:
         self.turn_count = 0
         self._cached_context = ""
 
+        if resumed:
+            recent = session_log.load_recent_turns(self.session_id, n=6)
+            for entry in recent:
+                self.short_term.add(entry["role"], entry["content"])
+                if entry["role"] == "user":
+                    self.turn_count += 1
+
     def _load_cached_context(self) -> str:
         self._cached_context = self.long_term.get_summary_context(self.session_id)
         return self._cached_context
@@ -58,6 +67,7 @@ class DatabaseAgent:
     def process_message(self, user_message: str) -> str:
         self.short_term.add("user", user_message)
         self.turn_count += 1
+        session_log.append_turn(self.session_id, "user", user_message)
 
         if self.turn_count == 1:
             self._load_cached_context()
@@ -71,10 +81,12 @@ class DatabaseAgent:
             conversation_history=conv_history,
             user_id=self.user_id,
             user_facts_memory=self.user_facts,
+            session_id=self.session_id,
         )
 
         answer = result.get("answer", "Error: no response from agent.")
         self.short_term.add("assistant", answer)
+        session_log.append_turn(self.session_id, "assistant", answer)
 
         reflections = result.get("reflections", [])
         if reflections:

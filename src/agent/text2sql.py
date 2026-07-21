@@ -4,6 +4,7 @@ import time
 
 from src.agent.llm_client import chat
 from src.db.connection import get_table_schema, execute_sql
+from src.memory import session_log
 
 
 AGENT_SYSTEM_PROMPT = """You are an agent with access to a PostgreSQL database tool.
@@ -80,6 +81,9 @@ Rules:
 - Check column and table names carefully against the schema above
 - Look at the error message closely — it often tells you the exact column or table that is wrong
 - Think step by step. Start your reasoning with THINK: then decide. Your full reasoning is shown to the user so be clear and traceable.
+
+### Conversation history search
+If the user asks about something from earlier turns that the summaries above don't cover, call search_memories(keyword) to look up the full conversation history. For example: search_memories("previous question about milestones") would search the chat log for those details.
 
 ### Implicit fact detection
 If you notice the user repeatedly filtering by the same value (e.g., same country, same category) across multiple turns, call store_fact to remember their preference. For example: if they ask about orders in France in two separate questions, store_fact("preferred_country", "France"). Do not mention this to the user — just silently store it."""
@@ -260,7 +264,25 @@ DELETE_FACT_TOOL = {
     },
 }
 
-ALL_TOOLS = [QUERY_DATABASE_TOOL, STORE_FACT_TOOL, DELETE_FACT_TOOL]
+SEARCH_MEMORIES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_memories",
+        "description": "Search past conversation history for a keyword or phrase. Use this when the user asks about something from earlier in the conversation that isn't covered by the session summaries.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "The keyword or phrase to search for in the conversation history",
+                }
+            },
+            "required": ["keyword"],
+        },
+    },
+}
+
+ALL_TOOLS = [QUERY_DATABASE_TOOL, STORE_FACT_TOOL, DELETE_FACT_TOOL, SEARCH_MEMORIES_TOOL]
 
 MAX_ITERATIONS = 5
 MAX_ERROR_RETRIES = 2
@@ -275,6 +297,7 @@ def _reflect(
     error: str = "",
     user_id: str | None = None,
     user_facts_memory=None,
+    session_id: str | None = None,
 ) -> dict:
     messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=get_table_schema())}]
 
@@ -331,7 +354,7 @@ def _reflect(
                 fallback = "I was about to process that but hit a temporary issue. Try again?"
             return {"action": "reply", "content": fallback, "raw": ""}
 
-    return _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
+    return _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
 
 
 def _msg_raw(msg) -> str:
@@ -345,8 +368,8 @@ def _msg_raw(msg) -> str:
     return "\n".join(parts)
 
 
-def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=None) -> dict:
-    """Parse LLM response. If user_facts_memory is provided, executes store_fact/delete_fact
+def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=None, session_id: str | None = None) -> dict:
+    """Parse LLM response. Executes store_fact/delete_fact/search_memories
     ops inline and returns only the first query_database or reply action."""
     raw = _msg_raw(msg)
     had_fact_ops = False
@@ -371,6 +394,11 @@ def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=
                 if key:
                     user_facts_memory.delete_fact(user_id, key)
                     had_fact_ops = True
+            elif name == "search_memories" and session_id:
+                keyword = args.get("keyword", "")
+                if keyword:
+                    results_text = session_log.search(session_id, keyword)
+                    return {"action": "tool", "tool_name": "search_memories", "keyword": keyword, "content": results_text, "raw": raw, "had_fact_ops": had_fact_ops}
 
         if query_tc:
             try:
@@ -398,44 +426,49 @@ def _build_audit_trail(all_sqls: list[str]) -> str:
     return "\n".join(parts)
 
 
+def _build_messages(
+    question: str,
+    schema: str,
+    long_term_context: str = "",
+    conversation_history: str = "",
+    accumulated_context: str = "",
+    user_id: str | None = None,
+    user_facts_memory=None,
+) -> list:
+    messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT.format(schema=schema)}]
+    if conversation_history:
+        messages.append({"role": "system", "content": f"Recent conversation:\n{conversation_history}"})
+    if long_term_context:
+        messages.append({"role": "system", "content": long_term_context})
+    if accumulated_context:
+        messages.append({"role": "system", "content": f"Additional context:\n{accumulated_context}"})
+    if user_id and user_facts_memory:
+        facts_str = user_facts_memory.format_facts(user_id)
+        if facts_str:
+            messages.append({"role": "system", "content": facts_str})
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
 def process_question(
     question: str,
     long_term_context: str = "",
     conversation_history: str = "",
     user_id: str | None = None,
     user_facts_memory=None,
+    session_id: str | None = None,
 ) -> dict:
     schema = get_table_schema()
-    system_prompt = AGENT_SYSTEM_PROMPT.format(schema=schema)
-    messages = [{"role": "system", "content": system_prompt}]
-
-    if conversation_history:
-        messages.append({
-            "role": "system",
-            "content": f"Recent conversation:\n{conversation_history}",
-        })
-
-    if long_term_context:
-        messages.append({
-            "role": "system",
-            "content": long_term_context,
-        })
-
-    if user_id and user_facts_memory:
-        facts_str = user_facts_memory.format_facts(user_id)
-        if facts_str:
-            messages.append({"role": "system", "content": facts_str})
-
+    messages = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory)
     accumulated_context = ""
     all_sqls = []
     reflections = []
     current_sql = ""
     error_retries = 0
 
-    messages.append({"role": "user", "content": question})
     msg = chat(messages, tools=ALL_TOOLS)
 
-    parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
+    parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
 
     if parsed["action"] == "reply":
         content = parsed.get("content", "")
@@ -466,7 +499,7 @@ def process_question(
                 ],
                 tools=ALL_TOOLS,
             )
-            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
+            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
@@ -486,8 +519,24 @@ def process_question(
                 ],
                 tools=ALL_TOOLS,
             )
-            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory)
+            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":
+                return {
+                    "success": True, "sql": "", "answer": parsed["content"],
+                    "action": "reply", "reflections": reflections,
+                }
+            continue
+
+        # --- search_memories ---
+        if tool_name == "search_memories":
+            keyword = parsed.get("keyword", "")
+            search_results = parsed["content"]
+            accumulated_context += f"\n[Session search for '{keyword}']:\n{search_results}\n"
+            messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory)
+            msg = chat(messages, tools=ALL_TOOLS)
+            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
+            if parsed["action"] == "reply":
+                audit = _build_audit_trail(all_sqls)
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
                     "action": "reply", "reflections": reflections,
@@ -527,6 +576,7 @@ def process_question(
                 conversation_history=conversation_history,
                 error=str(e),
                 user_id=user_id, user_facts_memory=user_facts_memory,
+                session_id=session_id,
             )
 
             reflections.append({
@@ -555,6 +605,7 @@ def process_question(
             accumulated_context=accumulated_context,
             conversation_history=conversation_history,
             user_id=user_id, user_facts_memory=user_facts_memory,
+            session_id=session_id,
         )
 
         reflections.append({
