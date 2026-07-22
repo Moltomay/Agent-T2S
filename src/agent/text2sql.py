@@ -13,7 +13,7 @@ import json
 import time
 
 from src.agent.llm_client import chat
-from src.db.connection import get_table_schema, execute_sql, get_scoped_schema
+from src.db.connection import get_table_schema, execute_sql, get_scoped_schema, ALL_SCOPED
 from src.memory import session_log
 
 
@@ -163,6 +163,20 @@ def validate_sql(sql: str) -> tuple[bool, str]:
     if semicolons > 0:
         return False, f"Multiple statements detected ({semicolons + 1} statements). Only single SELECT allowed."
 
+    return True, ""
+
+
+def validate_scoped_tables(sql: str, raw_tables: set[str]) -> tuple[bool, str]:
+    """Check that the SQL only references ``scoped_*`` or reference tables, never raw scoped tables.
+
+    Strips string literals before checking to avoid false positives on
+    values that happen to match a table name.
+    """
+    cleaned = _strip_sql_comments(sql)
+    no_strings: str = re.sub(r"'[^']*'", "", cleaned)
+    for table in raw_tables:
+        if re.search(rf'(?<!\w){re.escape(table)}(?!\w)', no_strings, re.IGNORECASE):
+            return False, f"Table '{table}' is not accessible. Use 'scoped_{table}' instead."
     return True, ""
 
 
@@ -631,6 +645,14 @@ def process_question(
                 "answer": f"Query blocked by guardrail: {reason}\n\n---\n*SQL attempted:* `{current_sql}`",
                 "action": "tool", "reflections": reflections,
             }
+        if use_scoping:
+            is_safe, reason = validate_scoped_tables(current_sql, ALL_SCOPED)
+            if not is_safe:
+                return {
+                    "success": False, "sql": current_sql,
+                    "answer": f"Query blocked by scoping guardrail: {reason}\n\n---\n*SQL attempted:* `{current_sql}`",
+                    "action": "tool", "reflections": reflections,
+                }
 
         try:
             full_sql: str = (cte_prefix + "\n" + current_sql) if cte_prefix else current_sql
