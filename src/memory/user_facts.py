@@ -74,6 +74,16 @@ class UserFactsMemory:
         self.session.commit()
         return True
 
+    def clear_facts(self, user_id: str) -> bool:
+        """Delete all facts for a user. Returns True if any were removed."""
+        entry = self.session.query(UserFactsEntry).filter_by(user_id=user_id).first()
+        if not entry or not entry.facts:
+            return False
+        entry.facts = {}
+        entry.updated_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return True
+
     def format_facts(self, user_id: str) -> str:
         """Return user facts as a human-readable string for the LLM prompt, or empty string."""
         facts = self.get_facts(user_id)

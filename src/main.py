@@ -196,6 +196,11 @@ def main() -> None:
         display_name: str = pmo_info[1]
         project_ids: list[str] = pmo_info[2]
         _store_display_name(user_id, display_name, overwrite=True)
+        # Clear orphaned facts keyed by the old app UUID
+        from src.memory.user_facts import UserFactsMemory
+        _facts = UserFactsMemory()
+        _facts.clear_facts(user_id)
+        _facts.close()
     else:
         pmo_user_id = None
         project_ids = None

@@ -458,11 +458,14 @@ def _build_messages(
     user_facts_memory=None,
     pmo_user_id: str | None = None,
     pmo_user_name: str | None = None,
+    fact_user_id: str | None = None,
 ) -> list[dict]:
     """Build the message list for the LLM, including system context, memory, and the user question.
 
     When Split-Plane RLS is active (``pmo_user_id`` is set), an identity
     message is injected so the LLM knows which PMO user it is acting as.
+    ``fact_user_id`` controls which key is used for ``user_facts`` lookups
+    (defaults to ``user_id`` when not provided).
     """
     messages: list[dict] = [{"role": "system", "content": AGENT_SYSTEM_PROMPT.format(schema=schema)}]
     if pmo_user_id and pmo_user_name:
@@ -476,8 +479,9 @@ def _build_messages(
         messages.append({"role": "system", "content": long_term_context})
     if accumulated_context:
         messages.append({"role": "system", "content": f"Additional context:\n{accumulated_context}"})
-    if user_id and user_facts_memory:
-        facts_str: str = user_facts_memory.format_facts(user_id)
+    fact_key: str | None = fact_user_id if fact_user_id else user_id
+    if fact_key and user_facts_memory:
+        facts_str: str = user_facts_memory.format_facts(fact_key)
         if facts_str:
             messages.append({"role": "system", "content": facts_str})
     messages.append({"role": "user", "content": question})
@@ -524,7 +528,8 @@ def process_question(
     else:
         schema = get_table_schema()
         cte_prefix = ""
-    messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name)
+    fact_user_id: str | None = pmo_user_id if pmo_user_id else user_id
+    messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name, fact_user_id=fact_user_id)
     accumulated_context: str = ""
     all_sqls: list[str] = []
     reflections: list[dict] = []
@@ -532,7 +537,7 @@ def process_question(
     error_retries: int = 0
 
     msg = chat(messages, tools=ALL_TOOLS)
-    parsed: dict = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
+    parsed: dict = _parse_response_from_msg(msg, user_id=fact_user_id, user_facts_memory=user_facts_memory, session_id=session_id)
 
     if parsed["action"] == "reply":
         content: str = parsed.get("content", "")
@@ -554,7 +559,7 @@ def process_question(
         if tool_name == "store_fact":
             key: str = parsed["content"]["key"]
             value: str = parsed["content"]["value"]
-            stored: bool = user_facts_memory.set_fact(user_id, key, value) if user_id and user_facts_memory else False
+            stored: bool = user_facts_memory.set_fact(fact_user_id, key, value) if fact_user_id and user_facts_memory else False
             accumulated_context += f"\n[Fact] stored '{key}' = '{value}'\n" if stored else f"\n[Fact] limit reached, '{key}' not stored\n"
             msg = chat(
                 [
@@ -563,7 +568,7 @@ def process_question(
                 ],
                 tools=ALL_TOOLS,
             )
-            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
+            parsed = _parse_response_from_msg(msg, user_id=fact_user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
@@ -574,7 +579,7 @@ def process_question(
         # --- delete_fact (from reflection or error recovery) ---
         if tool_name == "delete_fact":
             key = parsed["content"]["key"]
-            deleted: bool = user_facts_memory.delete_fact(user_id, key) if user_id and user_facts_memory else False
+            deleted: bool = user_facts_memory.delete_fact(fact_user_id, key) if fact_user_id and user_facts_memory else False
             accumulated_context += f"\n[Fact] deleted '{key}'\n" if deleted else f"\n[Fact] '{key}' not found\n"
             msg = chat(
                 [
@@ -583,7 +588,7 @@ def process_question(
                 ],
                 tools=ALL_TOOLS,
             )
-            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
+            parsed = _parse_response_from_msg(msg, user_id=fact_user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
@@ -598,9 +603,9 @@ def process_question(
             result_count: int = len([l for l in search_results.split("\n") if l.strip()])
             print(f"  [Search results] '{keyword}' — {result_count} line(s) found")
             accumulated_context += f"\n[Session search for '{keyword}']:\n{search_results}\n"
-            messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name)
+            messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name, fact_user_id=fact_user_id)
             msg = chat(messages, tools=ALL_TOOLS)
-            parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
+            parsed = _parse_response_from_msg(msg, user_id=fact_user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":
                 audit: str = _build_audit_trail(all_sqls)
                 return {
@@ -644,7 +649,7 @@ def process_question(
                 accumulated_context=accumulated_context,
                 conversation_history=conversation_history,
                 error=str(e),
-                user_id=user_id, user_facts_memory=user_facts_memory,
+                user_id=fact_user_id, user_facts_memory=user_facts_memory,
                 session_id=session_id,
                 schema=schema if use_scoping else None,
             )
@@ -674,7 +679,7 @@ def process_question(
             question, current_sql, results=results,
             accumulated_context=accumulated_context,
             conversation_history=conversation_history,
-            user_id=user_id, user_facts_memory=user_facts_memory,
+            user_id=fact_user_id, user_facts_memory=user_facts_memory,
             session_id=session_id,
             schema=schema if use_scoping else None,
         )
