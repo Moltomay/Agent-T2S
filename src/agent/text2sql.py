@@ -528,7 +528,7 @@ def process_question(
     else:
         schema = get_table_schema()
         cte_prefix = ""
-    fact_user_id: str | None = pmo_user_id if pmo_user_id else user_id
+    fact_user_id: str | None = str(pmo_user_id) if pmo_user_id else user_id
     messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name, fact_user_id=fact_user_id)
     accumulated_context: str = ""
     all_sqls: list[str] = []
