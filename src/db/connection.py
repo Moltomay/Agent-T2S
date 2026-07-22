@@ -103,14 +103,16 @@ def build_ctes(project_ids: list, user_id: str) -> str:
         A ``WITH ...`` SQL string, or empty string if no project_ids.
     """
     if not project_ids:
-        return ""
-
-    pids: str = ", ".join(_quote_ids(project_ids))
+        project_filter: str = "1=0"
+        pids: str = ""
+    else:
+        pids = ", ".join(_quote_ids(project_ids))
+        project_filter = f"id IN ({pids})"
     uid: str = _quote_ids([user_id])[0] if user_id else "''"
 
     ctes: list[str] = [
         # ── Project-scoped ──────────────────────────────────────────────
-        f"scoped_projects AS (SELECT * FROM projects WHERE id IN ({pids}) AND is_deleted = false)",
+        f"scoped_projects AS (SELECT * FROM projects WHERE {project_filter} AND is_deleted = false)",
         f"scoped_milestones AS (SELECT m.* FROM milestones m INNER JOIN scoped_projects p ON m.project_id = p.id AND m.is_deleted = false)",
         f"scoped_financial_metrics AS (SELECT f.* FROM financial_metrics f INNER JOIN scoped_projects p ON f.project_id = p.id)",
         f"scoped_project_statuses AS (SELECT ps.* FROM project_statuses ps INNER JOIN scoped_projects p ON ps.project_id = p.id)",
@@ -118,7 +120,7 @@ def build_ctes(project_ids: list, user_id: str) -> str:
         f"scoped_project_partners AS (SELECT pp.* FROM project_partners pp INNER JOIN scoped_projects p ON pp.project_id = p.id)",
         f"scoped_project_temporal_values AS (SELECT t.* FROM project_temporal_values t INNER JOIN scoped_projects p ON t.project_id = p.id)",
         # ── History tables (scoped by the same project IDs) ────────────
-        f"scoped_projects_history AS (SELECT * FROM projects_history WHERE id IN ({pids}))",
+        f"scoped_projects_history AS (SELECT * FROM projects_history WHERE {project_filter})",
         f"scoped_milestones_history AS (SELECT mh.* FROM milestones_history mh INNER JOIN scoped_projects p ON mh.project_id = p.id)",
         f"scoped_financial_metrics_history AS (SELECT fh.* FROM financial_metrics_history fh INNER JOIN scoped_projects p ON fh.project_id = p.id)",
         f"scoped_project_statuses_history AS (SELECT psh.* FROM project_statuses_history psh INNER JOIN scoped_projects p ON psh.project_id = p.id)",
