@@ -534,7 +534,7 @@ def process_question(
         - ``action`` (str): ``"reply"`` or ``"tool"``
         - ``reflections`` (list[dict]): trace of all reflection steps
     """
-    use_scoping: bool = bool(project_ids and pmo_user_id)
+    use_scoping: bool = project_ids is not None and bool(pmo_user_id)
     if use_scoping:
         from src.db.connection import build_ctes
         schema: str = get_scoped_schema(project_ids, pmo_user_id)
