@@ -63,6 +63,7 @@ class DatabaseAgent:
         session_id: str | None = None,
         user_id: str | None = None,
         pmo_user_id: str | None = None,
+        pmo_user_name: str | None = None,
         project_ids: list | None = None,
     ) -> None:
         if session_id:
@@ -72,6 +73,7 @@ class DatabaseAgent:
             self.session_id: str = _generate_session_id()
         self.user_id: str | None = user_id
         self.pmo_user_id: str | None = pmo_user_id
+        self.pmo_user_name: str | None = pmo_user_name
         self.project_ids: list | None = project_ids
         self.short_term: ShortTermMemory = ShortTermMemory(max_turns=10)
         self.long_term: LongTermMemory = LongTermMemory()
@@ -107,6 +109,7 @@ class DatabaseAgent:
             user_facts_memory=self.user_facts,
             session_id=self.session_id,
             pmo_user_id=self.pmo_user_id,
+            pmo_user_name=self.pmo_user_name,
             project_ids=self.project_ids,
         )
 

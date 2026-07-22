@@ -456,9 +456,20 @@ def _build_messages(
     accumulated_context: str = "",
     user_id: str | None = None,
     user_facts_memory=None,
+    pmo_user_id: str | None = None,
+    pmo_user_name: str | None = None,
 ) -> list[dict]:
-    """Build the message list for the LLM, including system context, memory, and the user question."""
+    """Build the message list for the LLM, including system context, memory, and the user question.
+
+    When Split-Plane RLS is active (``pmo_user_id`` is set), an identity
+    message is injected so the LLM knows which PMO user it is acting as.
+    """
     messages: list[dict] = [{"role": "system", "content": AGENT_SYSTEM_PROMPT.format(schema=schema)}]
+    if pmo_user_id and pmo_user_name:
+        messages.append({
+            "role": "system",
+            "content": f"Your identity: PMO user '{pmo_user_name}' (id: {pmo_user_id}). When asked 'my projects' or 'what I have access to', query scoped_projects or scoped_team_members referencing this user id.",
+        })
     if conversation_history:
         messages.append({"role": "system", "content": f"Recent conversation:\n{conversation_history}"})
     if long_term_context:
@@ -481,6 +492,7 @@ def process_question(
     user_facts_memory=None,
     session_id: str | None = None,
     pmo_user_id: str | None = None,
+    pmo_user_name: str | None = None,
     project_ids: list | None = None,
 ) -> dict:
     """Main ReAct loop: LLM decides tool, results reflected, repeat up to MAX_ITERATIONS.
@@ -493,6 +505,7 @@ def process_question(
         user_facts_memory: ``UserFactsMemory`` instance for store/delete operations.
         session_id: Current session UUID (for ``search_memories``).
         pmo_user_id: PMO ``users.id`` for Split-Plane RLS scoping.
+        pmo_user_name: Display name of the PMO user (injected into LLM context).
         project_ids: List of project UUIDs the PMO user can access.
 
     Returns:
@@ -511,7 +524,7 @@ def process_question(
     else:
         schema = get_table_schema()
         cte_prefix = ""
-    messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory)
+    messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name)
     accumulated_context: str = ""
     all_sqls: list[str] = []
     reflections: list[dict] = []
@@ -585,7 +598,7 @@ def process_question(
             result_count: int = len([l for l in search_results.split("\n") if l.strip()])
             print(f"  [Search results] '{keyword}' — {result_count} line(s) found")
             accumulated_context += f"\n[Session search for '{keyword}']:\n{search_results}\n"
-            messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory)
+            messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory, pmo_user_id=pmo_user_id, pmo_user_name=pmo_user_name)
             msg = chat(messages, tools=ALL_TOOLS)
             parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":

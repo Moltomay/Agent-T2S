@@ -101,14 +101,23 @@ def _pick_pmo_user() -> tuple[str, str, list[str]] | None:
     return None
 
 
-def _store_display_name(user_id: str, display_name: str) -> None:
-    """Persist the display name in user_facts for future sessions."""
+def _store_display_name(user_id: str, display_name: str, overwrite: bool = False) -> None:
+    """Persist the display name in user_facts for future sessions.
+
+    Args:
+        user_id: The app UUID.
+        display_name: The name to store.
+        overwrite: When True (PMO user picked), overwrites any existing name.
+    """
     from src.memory.user_facts import UserFactsMemory
 
     facts = UserFactsMemory()
-    existing = facts.get_facts(user_id)
-    if "name" not in existing:
+    if overwrite:
         facts.set_fact(user_id, "name", display_name)
+    else:
+        existing = facts.get_facts(user_id)
+        if "name" not in existing:
+            facts.set_fact(user_id, "name", display_name)
     facts.close()
 
 
@@ -186,7 +195,7 @@ def main() -> None:
         pmo_user_id: str = pmo_info[0]
         display_name: str = pmo_info[1]
         project_ids: list[str] = pmo_info[2]
-        _store_display_name(user_id, display_name)
+        _store_display_name(user_id, display_name, overwrite=True)
     else:
         pmo_user_id = None
         project_ids = None
@@ -206,6 +215,7 @@ def main() -> None:
         session_id=session_id,
         user_id=user_id,
         pmo_user_id=pmo_user_id,
+        pmo_user_name=display_name,
         project_ids=project_ids,
     )
     if session_id:
