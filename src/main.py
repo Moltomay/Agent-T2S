@@ -1,10 +1,11 @@
-"""CLI entry point — session picker, persistent user identity, and the main REPL loop.
+"""CLI entry point — PMO user identity, session picker, and the main REPL loop.
 
 Manages:
-- User UUID persistence (``.user_id`` file)
-- Display name capture + persistence via ``UserFactsMemory``
-- Session picker scoped by user UUID (``/memory`` tables)
-- Interactive loop with ``/history``, ``/memory``, ``/exit`` commands
+- User UUID persistence (``.user_id`` file) for internal session tracking.
+- PMO user picker — select a real user from the PMO ``users`` table.
+- Split-Plane RLS — computes accessible project IDs for the chosen PMO user.
+- Session picker scoped by UUID (``agent_memory`` table).
+- Interactive loop with ``/history``, ``/memory``, ``/exit`` commands.
 """
 
 import sys
@@ -53,22 +54,62 @@ def _load_user_id() -> str:
     return uid
 
 
-def _ensure_display_name(user_id: str) -> str:
-    """Prompt for the user's display name on first run; persist via UserFactsMemory."""
+def _pick_pmo_user() -> tuple[str, str, list[str]] | None:
+    """Show the list of active PMO users and let the user pick one.
+
+    Returns:
+        ``(pmo_user_id, display_name, project_ids)`` or ``None`` to skip scoping.
+    """
+    from src.db.connection import get_pmo_users, get_user_project_ids
+
+    print("\n" + "=" * 60)
+    print("  PMO User Identity")
+    print("=" * 60)
+    try:
+        users = get_pmo_users()
+    except Exception as e:
+        print(f"  Could not fetch PMO users: {e}")
+        print("  Continuing without RLS scoping.")
+        return None
+
+    if not users:
+        print("  No active PMO users found. Continuing without RLS scoping.")
+        return None
+
+    print("  Select your user identity (for data access scoping):")
+    print("  " + "-" * 55)
+    for i, u in enumerate(users, 1):
+        print(f"  {i}. {u['display_name']}  ({u['email']})")
+    print("  " + "-" * 55)
+    print("  0. Skip RLS scoping (see all data)")
+    choice: str = input("  Pick a number [1]: ").strip()
+
+    if choice == "0":
+        return None
+
+    try:
+        idx: int = int(choice) - 1 if choice else 0
+        if 0 <= idx < len(users):
+            pmo_user = users[idx]
+            print(f"  Computing accessible projects for {pmo_user['display_name']}...")
+            project_ids = get_user_project_ids(pmo_user["id"])
+            print(f"  {pmo_user['display_name']} has access to {len(project_ids)} project(s).")
+            return (pmo_user["id"], pmo_user["display_name"], project_ids)
+    except ValueError:
+        pass
+
+    return None
+
+
+def _store_display_name(user_id: str, display_name: str) -> None:
+    """Persist the display name in user_facts for future sessions."""
     from src.memory.user_facts import UserFactsMemory
 
     facts = UserFactsMemory()
     existing = facts.get_facts(user_id)
-    if "name" in existing:
-        return existing["name"]
-    print("\n" + "=" * 60)
-    name: str = input("  Welcome! What's your name? ").strip()
-    if name:
-        facts.set_fact(user_id, "name", name)
-    else:
-        name = "User"
+    if "name" not in existing:
+        facts.set_fact(user_id, "name", display_name)
     facts.close()
-    return name
 
 
 def print_banner() -> None:
@@ -131,20 +172,49 @@ def _backfill_user_id(user_id: str) -> None:
 
 
 def main() -> None:
-    """Start the interactive CLI: identity, session picker, then REPL loop."""
+    """Start the interactive CLI: identity, PMO user picker, session picker, then REPL loop."""
     from src.agent.agent import DatabaseAgent
 
     print("Database ready.")
 
     user_id: str = _load_user_id()
     _backfill_user_id(user_id)
-    display_name: str = _ensure_display_name(user_id)
+
+    # PMO user identity for RLS scoping
+    pmo_info = _pick_pmo_user()
+    if pmo_info:
+        pmo_user_id: str = pmo_info[0]
+        display_name: str = pmo_info[1]
+        project_ids: list[str] = pmo_info[2]
+        _store_display_name(user_id, display_name)
+    else:
+        pmo_user_id = None
+        project_ids = None
+        # Fallback: prompt for display name
+        from src.memory.user_facts import UserFactsMemory
+        facts = UserFactsMemory()
+        existing = facts.get_facts(user_id)
+        display_name = existing.get("name", "")
+        if not display_name:
+            print("\n" + "=" * 60)
+            display_name = input("  Welcome! What's your name? ").strip() or "User"
+            facts.set_fact(user_id, "name", display_name)
+        facts.close()
+
     session_id: str | None = _pick_session(user_id)
-    agent = DatabaseAgent(session_id=session_id, user_id=user_id)
+    agent = DatabaseAgent(
+        session_id=session_id,
+        user_id=user_id,
+        pmo_user_id=pmo_user_id,
+        project_ids=project_ids,
+    )
     if session_id:
         print(f"\n  Welcome back, {display_name}! Continuing session: {agent.session_id}\n")
     else:
         print(f"\n  Hello, {display_name}! New session: {agent.session_id}\n")
+
+    if pmo_user_id:
+        print(f"  RLS scoping active — {len(project_ids)} project(s) accessible.\n")
 
     print_banner()
 

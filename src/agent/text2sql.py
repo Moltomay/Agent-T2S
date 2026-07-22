@@ -13,7 +13,7 @@ import json
 import time
 
 from src.agent.llm_client import chat
-from src.db.connection import get_table_schema, execute_sql
+from src.db.connection import get_table_schema, execute_sql, get_scoped_schema
 from src.memory import session_log
 
 
@@ -298,13 +298,15 @@ def _reflect(
     user_id: str | None = None,
     user_facts_memory=None,
     session_id: str | None = None,
+    schema: str | None = None,
 ) -> dict:
     """Reflection step: present SQL results (or error) back to the LLM to decide next action.
 
     Returns a parsed dict (same shape as ``_parse_response_from_msg``).
     Falls back to a raw data dump if all LLM calls are rate-limited.
     """
-    messages: list[dict] = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=get_table_schema())}]
+    schema = schema or get_table_schema()
+    messages: list[dict] = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=schema)}]
 
     if accumulated_context:
         messages.append({
@@ -478,6 +480,8 @@ def process_question(
     user_id: str | None = None,
     user_facts_memory=None,
     session_id: str | None = None,
+    pmo_user_id: str | None = None,
+    project_ids: list | None = None,
 ) -> dict:
     """Main ReAct loop: LLM decides tool, results reflected, repeat up to MAX_ITERATIONS.
 
@@ -488,6 +492,8 @@ def process_question(
         user_id: Persistent user UUID (for facts and session scoping).
         user_facts_memory: ``UserFactsMemory`` instance for store/delete operations.
         session_id: Current session UUID (for ``search_memories``).
+        pmo_user_id: PMO ``users.id`` for Split-Plane RLS scoping.
+        project_ids: List of project UUIDs the PMO user can access.
 
     Returns:
         Dict with keys:
@@ -497,7 +503,14 @@ def process_question(
         - ``action`` (str): ``"reply"`` or ``"tool"``
         - ``reflections`` (list[dict]): trace of all reflection steps
     """
-    schema: str = get_table_schema()
+    use_scoping: bool = bool(project_ids and pmo_user_id)
+    if use_scoping:
+        from src.db.connection import build_ctes
+        schema: str = get_scoped_schema(project_ids, pmo_user_id)
+        cte_prefix: str = build_ctes(project_ids, pmo_user_id)
+    else:
+        schema = get_table_schema()
+        cte_prefix = ""
     messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory)
     accumulated_context: str = ""
     all_sqls: list[str] = []
@@ -602,7 +615,8 @@ def process_question(
             }
 
         try:
-            results: list[dict] = execute_sql(current_sql)
+            full_sql: str = (cte_prefix + "\n" + current_sql) if cte_prefix else current_sql
+            results: list[dict] = execute_sql(full_sql)
         except Exception as e:
             error_retries += 1
             if error_retries > MAX_ERROR_RETRIES:
@@ -619,6 +633,7 @@ def process_question(
                 error=str(e),
                 user_id=user_id, user_facts_memory=user_facts_memory,
                 session_id=session_id,
+                schema=schema if use_scoping else None,
             )
 
             reflections.append({
@@ -648,6 +663,7 @@ def process_question(
             conversation_history=conversation_history,
             user_id=user_id, user_facts_memory=user_facts_memory,
             session_id=session_id,
+            schema=schema if use_scoping else None,
         )
 
         reflections.append({

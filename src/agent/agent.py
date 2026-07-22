@@ -55,15 +55,24 @@ class DatabaseAgent:
     - Tracks turn count and triggers leaf memory creation every 5 turns.
     - Handles hierarchical rollup (leafs → blocks → broads).
     - Logs every turn to the session markdown file for ``search_memories``.
+    - Optionally enforces Split-Plane RLS via ``pmo_user_id`` / ``project_ids``.
     """
 
-    def __init__(self, session_id: str | None = None, user_id: str | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        pmo_user_id: str | None = None,
+        project_ids: list | None = None,
+    ) -> None:
         if session_id:
             self.session_id: str = session_id
             _save_session_id(session_id)
         else:
             self.session_id: str = _generate_session_id()
         self.user_id: str | None = user_id
+        self.pmo_user_id: str | None = pmo_user_id
+        self.project_ids: list | None = project_ids
         self.short_term: ShortTermMemory = ShortTermMemory(max_turns=10)
         self.long_term: LongTermMemory = LongTermMemory()
         self.user_facts: UserFactsMemory | None = UserFactsMemory() if user_id else None
@@ -97,6 +106,8 @@ class DatabaseAgent:
             user_id=self.user_id,
             user_facts_memory=self.user_facts,
             session_id=self.session_id,
+            pmo_user_id=self.pmo_user_id,
+            project_ids=self.project_ids,
         )
 
         answer: str = result.get("answer", "Error: no response from agent.")
