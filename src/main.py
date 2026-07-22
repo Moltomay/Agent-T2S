@@ -1,3 +1,12 @@
+"""CLI entry point — session picker, persistent user identity, and the main REPL loop.
+
+Manages:
+- User UUID persistence (``.user_id`` file)
+- Display name capture + persistence via ``UserFactsMemory``
+- Session picker scoped by user UUID (``/memory`` tables)
+- Interactive loop with ``/history``, ``/memory``, ``/exit`` commands
+"""
+
 import sys
 import os
 import uuid
@@ -6,12 +15,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OLD_USER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".user_id")
-USER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", ".user_id")
+OLD_USER_ID_FILE: str = os.path.join(os.path.dirname(__file__), "..", "..", ".user_id")
+USER_ID_FILE: str = os.path.join(os.path.dirname(__file__), "..", ".user_id")
 
 
 def _load_user_id() -> str:
-    # Migrate from old (wrong) path if it exists
+    """Load existing user UUID from disk, or generate and persist a new one.
+
+    Migrates from the old (wrong) path to the correct project-root location.
+    """
     try:
         if os.path.exists(OLD_USER_ID_FILE):
             with open(OLD_USER_ID_FILE) as f:
@@ -32,7 +44,7 @@ def _load_user_id() -> str:
                     return uid
     except Exception:
         pass
-    uid = str(uuid.uuid4())
+    uid: str = str(uuid.uuid4())
     try:
         with open(USER_ID_FILE, "w") as f:
             f.write(uid)
@@ -42,6 +54,7 @@ def _load_user_id() -> str:
 
 
 def _ensure_display_name(user_id: str) -> str:
+    """Prompt for the user's display name on first run; persist via UserFactsMemory."""
     from src.memory.user_facts import UserFactsMemory
 
     facts = UserFactsMemory()
@@ -49,7 +62,7 @@ def _ensure_display_name(user_id: str) -> str:
     if "name" in existing:
         return existing["name"]
     print("\n" + "=" * 60)
-    name = input("  Welcome! What's your name? ").strip()
+    name: str = input("  Welcome! What's your name? ").strip()
     if name:
         facts.set_fact(user_id, "name", name)
     else:
@@ -58,7 +71,8 @@ def _ensure_display_name(user_id: str) -> str:
     return name
 
 
-def print_banner():
+def print_banner() -> None:
+    """Print the welcome banner with available commands."""
     print("=" * 60)
     print("  Database Agent PoC — Text-to-SQL + Memory")
     print("=" * 60)
@@ -68,6 +82,10 @@ def print_banner():
 
 
 def _pick_session(user_id: str) -> str | None:
+    """Show existing sessions for this user and let them pick one to resume.
+
+    Returns the session id string, or ``None`` for a new session.
+    """
     from src.memory.long_term import LongTermMemory
 
     long_term = LongTermMemory()
@@ -80,16 +98,16 @@ def _pick_session(user_id: str) -> str | None:
     print("\nExisting sessions:")
     print("  " + "-" * 55)
     for i, s in enumerate(sessions, 1):
-        ts = s["last_activity"].strftime("%Y-%m-%d %H:%M") if s["last_activity"] else "?"
+        ts: str = s["last_activity"].strftime("%Y-%m-%d %H:%M") if s["last_activity"] else "?"
         print(f"  {i}. {s['session_id']} — {s['turn_count']} turns, {s['summary_count']} memories, last {ts}")
     print("  " + "-" * 55)
-    choice = input("  [n]ew session, or pick a number to continue [n]: ").strip().lower()
+    choice: str = input("  [n]ew session, or pick a number to continue [n]: ").strip().lower()
 
     if choice == "n" or choice == "":
         return None
 
     try:
-        idx = int(choice) - 1
+        idx: int = int(choice) - 1
         if 0 <= idx < len(sessions):
             return sessions[idx]["session_id"]
     except ValueError:
@@ -98,7 +116,8 @@ def _pick_session(user_id: str) -> str | None:
     return None
 
 
-def _backfill_user_id(user_id: str):
+def _backfill_user_id(user_id: str) -> None:
+    """Assign ``user_id`` to any agent_memory rows that lack one (migration helper)."""
     from src.memory.long_term import LongTermMemory
     from sqlalchemy import text
 
@@ -111,15 +130,16 @@ def _backfill_user_id(user_id: str):
     long_term.close()
 
 
-def main():
+def main() -> None:
+    """Start the interactive CLI: identity, session picker, then REPL loop."""
     from src.agent.agent import DatabaseAgent
 
     print("Database ready.")
 
-    user_id = _load_user_id()
+    user_id: str = _load_user_id()
     _backfill_user_id(user_id)
-    display_name = _ensure_display_name(user_id)
-    session_id = _pick_session(user_id)
+    display_name: str = _ensure_display_name(user_id)
+    session_id: str | None = _pick_session(user_id)
     agent = DatabaseAgent(session_id=session_id, user_id=user_id)
     if session_id:
         print(f"\n  Welcome back, {display_name}! Continuing session: {agent.session_id}\n")
@@ -130,7 +150,7 @@ def main():
 
     while True:
         try:
-            user_input = input(f"\n{display_name}: ").strip()
+            user_input: str = input(f"\n{display_name}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -144,7 +164,7 @@ def main():
 
         if user_input.lower() == "/history":
             for entry in agent.get_history():
-                role = "You" if entry["role"] == "user" else "Agent"
+                role: str = "You" if entry["role"] == "user" else "Agent"
                 print(f"\n[{role}]\n{entry['content']}")
             continue
 
@@ -154,11 +174,11 @@ def main():
                 print("No long-term memories yet.")
             else:
                 for s in summaries:
-                    ts = s.created_at.strftime("%Y-%m-%d %H:%M")
+                    ts: str = s.created_at.strftime("%Y-%m-%d %H:%M")
                     print(f"\n[{ts}] (turn {s.turn_count})\n{s.summary}")
             continue
 
-        response = agent.process_message(user_input)
+        response: str = agent.process_message(user_input)
         print(f"Agent: {response}")
 
 

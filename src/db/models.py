@@ -1,5 +1,12 @@
+"""SQLAlchemy ORM models for the old seed-data schema (customers, products, orders).
+
+These models are **not currently used** by the agent — the PMO database
+has its own schema with 29 tables. They remain for reference and backward
+compatibility with the original PoC seed script (``seed.py``).
+"""
+
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, ForeignKey, Numeric, Text
+    Column, Integer, String, Float, DateTime, ForeignKey, Numeric, Text,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -8,6 +15,8 @@ from src.db.connection import Base
 
 
 class Customer(Base):
+    """Seed-data customer model."""
+
     __tablename__ = "customers"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -21,6 +30,8 @@ class Customer(Base):
 
 
 class Product(Base):
+    """Seed-data product model."""
+
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -34,6 +45,8 @@ class Product(Base):
 
 
 class Order(Base):
+    """Seed-data order model."""
+
     __tablename__ = "orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -47,6 +60,8 @@ class Order(Base):
 
 
 class OrderItem(Base):
+    """Seed-data order-item model (join table)."""
+
     __tablename__ = "order_items"
 
     id = Column(Integer, primary_key=True, autoincrement=True)

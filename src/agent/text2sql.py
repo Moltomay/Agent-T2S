@@ -1,3 +1,13 @@
+"""ReAct agent with native function calling, SQL guardrails, and multi-step reflection.
+
+The core SQL pipeline:
+1. LLM decides to call ``query_database``, ``store_fact``, ``delete_fact``, or ``search_memories``
+2. ``_parse_response_from_msg`` executes fact ops and search inline
+3. SQL is validated by ``validate_sql`` (word-boundary regex guardrails)
+4. Results are fed back to the LLM via ``_reflect`` for up to 5 iterations
+5. On rate-limit failures, falls back to a data-row dump
+"""
+
 import re
 import json
 import time
@@ -69,39 +79,39 @@ If the user asks about something from earlier turns that the summaries above don
 If you notice the user repeatedly filtering by the same value (e.g., same country, same category) across multiple turns, call store_fact to remember their preference. For example: if they ask about orders in France in two separate questions, store_fact("preferred_country", "France"). Do not mention this to the user — just silently store it."""
 
 # Tokens that are NEVER allowed in any position
-FORBIDDEN_TOKENS = [
+FORBIDDEN_TOKENS: list[str] = [
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
     "CREATE", "REPLACE", "GRANT", "REVOKE", "EXECUTE", "CALL",
 ]
 
 # Tokens that may appear after SELECT but are still dangerous
-DANGEROUS_AFTER_SELECT = [
-    "INTO",           # SELECT INTO creates a new table
-    "COPY",           # exports/imports data
-    "PG_SLEEP",       # time-based injection
-    "PG_READ_FILE",   # read server files
-    "PG_WRITE_FILE",  # write server files
-    "LO_IMPORT",      # large object import
-    "LO_EXPORT",      # large object export
-    "NOTIFY",         # send notifications
-    "LISTEN",         # listen for notifications
+DANGEROUS_AFTER_SELECT: list[str] = [
+    "INTO",
+    "COPY",
+    "PG_SLEEP",
+    "PG_READ_FILE",
+    "PG_WRITE_FILE",
+    "LO_IMPORT",
+    "LO_EXPORT",
+    "NOTIFY",
+    "LISTEN",
 ]
 
 # System user IDs to never expose (PostgreSQL superusers)
-SYSTEM_USERS = {"postgres", "pg_signal_backend", "pg_read_all_data",
-                "pg_write_all_data", "pg_read_all_settings",
-                "pg_read_all_stats", "pg_monitor", "pg_stat_scan_tables"}
+SYSTEM_USERS: set[str] = {"postgres", "pg_signal_backend", "pg_read_all_data",
+                          "pg_write_all_data", "pg_read_all_settings",
+                          "pg_read_all_stats", "pg_monitor", "pg_stat_scan_tables"}
 
 
 def _strip_sql_comments(sql: str) -> str:
-    """Remove SQL comments before validation."""
+    """Remove single-line (``--``) and block (``/* */``) SQL comments."""
     sql = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
     sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     return sql
 
 
 def _first_token(sql: str) -> str:
-    """Get the first meaningful SQL token."""
+    """Return the first non-comment SQL token uppercased."""
     cleaned = _strip_sql_comments(sql).strip()
     if not cleaned:
         return ""
@@ -109,17 +119,28 @@ def _first_token(sql: str) -> str:
 
 
 def validate_sql(sql: str) -> tuple[bool, str]:
-    """Validate SQL is safe to execute. Returns (is_safe, reason)."""
+    """Validate that a SQL string is safe to execute.
+
+    Checks:
+    - Must be a single SELECT statement
+    - No forbidden tokens (INSERT, DELETE, DROP, etc.)
+    - No dangerous post-SELECT tokens (INTO, COPY, PG_SLEEP, etc.)
+    - No system user references
+    - No multi-statement semicolons outside string literals
+
+    Returns:
+        ``(True, "")`` if safe, ``(False, reason)`` otherwise.
+    """
     if not sql or not sql.strip():
         return False, "Empty SQL query."
 
     cleaned = _strip_sql_comments(sql)
-    upper_sql = cleaned.upper().strip()
+    upper_sql: str = cleaned.upper().strip()
 
     if not upper_sql:
         return False, "Query contains only comments."
 
-    first = upper_sql.split()[0] if upper_sql.split() else ""
+    first: str = upper_sql.split()[0] if upper_sql.split() else ""
 
     if first != "SELECT":
         return False, f"Only SELECT queries are allowed. Got '{first}'."
@@ -132,13 +153,13 @@ def validate_sql(sql: str) -> tuple[bool, str]:
         if re.search(rf'(?<!\w){token}(?!\w)', upper_sql):
             return False, f"'{token}' is not allowed."
 
-    detected_users = [u for u in SYSTEM_USERS if re.search(rf'(?<!\w){u.upper()}(?!\w)', upper_sql)]
+    detected_users: list[str] = [u for u in SYSTEM_USERS if re.search(rf'(?<!\w){u.upper()}(?!\w)', upper_sql)]
     if detected_users:
         return False, f"Query references system user(s): {', '.join(detected_users)}."
 
     # Multi-statement check: count semicolons outside string literals
-    stripped_strings = re.sub(r"'[^']*'", "", cleaned)
-    semicolons = stripped_strings.count(";")
+    stripped_strings: str = re.sub(r"'[^']*'", "", cleaned)
+    semicolons: int = stripped_strings.count(";")
     if semicolons > 0:
         return False, f"Multiple statements detected ({semicolons + 1} statements). Only single SELECT allowed."
 
@@ -146,7 +167,7 @@ def validate_sql(sql: str) -> tuple[bool, str]:
 
 
 def _strip_think_block(text: str) -> str:
-    """Remove THINK: ... block before REPLY/TOOL parsing."""
+    """Remove the ``THINK: ...`` preamble, stopping at REPLY or TOOL."""
     return re.sub(
         r"^\s*THINK\s*:.*?(?=REPLY|TOOL)",
         "",
@@ -157,16 +178,17 @@ def _strip_think_block(text: str) -> str:
 
 
 def _parse_agent_response(raw: str) -> dict:
-    """Parse LLM response into (action: 'reply'|'tool', payload: str)."""
+    """Fallback text parser for when the LLM outputs TOOL/REPLY in content instead of using native tool_calls.
+
+    Returns a dict with keys ``action`` (``"reply"`` | ``"tool"``) and ``content``.
+    """
     stripped = _strip_think_block(raw.strip())
 
-    # Check for REPLY prefix
     reply_match = re.match(r"^\s*REPLY\s*:?\s*\n?(.*)", stripped, re.DOTALL | re.IGNORECASE)
     if reply_match:
         content = reply_match.group(1).strip()
         return {"action": "reply", "content": content}
 
-    # Check for TOOL prefix
     tool_match = re.match(r"^\s*TOOL\s*:?\s*\n?(.*)", stripped, re.DOTALL | re.IGNORECASE)
     if tool_match:
         body = tool_match.group(1).strip()
@@ -176,17 +198,15 @@ def _parse_agent_response(raw: str) -> dict:
             return {"action": "tool", "content": sql}
         return {"action": "tool", "content": body.rstrip(";")}
 
-    # Fallback: look for any SQL code block
     fallback_sql = re.search(r"```(?:sql)?\s*\n?(.*?)\n?```", stripped, re.DOTALL | re.IGNORECASE)
     if fallback_sql:
         sql = fallback_sql.group(1).strip().rstrip(";")
         return {"action": "tool", "content": sql}
 
-    # Fallback: treat as reply
     return {"action": "reply", "content": stripped}
 
 
-QUERY_DATABASE_TOOL = {
+QUERY_DATABASE_TOOL: dict = {
     "type": "function",
     "function": {
         "name": "query_database",
@@ -204,7 +224,7 @@ QUERY_DATABASE_TOOL = {
     },
 }
 
-STORE_FACT_TOOL = {
+STORE_FACT_TOOL: dict = {
     "type": "function",
     "function": {
         "name": "store_fact",
@@ -226,7 +246,7 @@ STORE_FACT_TOOL = {
     },
 }
 
-DELETE_FACT_TOOL = {
+DELETE_FACT_TOOL: dict = {
     "type": "function",
     "function": {
         "name": "delete_fact",
@@ -244,7 +264,7 @@ DELETE_FACT_TOOL = {
     },
 }
 
-SEARCH_MEMORIES_TOOL = {
+SEARCH_MEMORIES_TOOL: dict = {
     "type": "function",
     "function": {
         "name": "search_memories",
@@ -262,10 +282,10 @@ SEARCH_MEMORIES_TOOL = {
     },
 }
 
-ALL_TOOLS = [QUERY_DATABASE_TOOL, STORE_FACT_TOOL, DELETE_FACT_TOOL, SEARCH_MEMORIES_TOOL]
+ALL_TOOLS: list[dict] = [QUERY_DATABASE_TOOL, STORE_FACT_TOOL, DELETE_FACT_TOOL, SEARCH_MEMORIES_TOOL]
 
-MAX_ITERATIONS = 5
-MAX_ERROR_RETRIES = 2
+MAX_ITERATIONS: int = 5
+MAX_ERROR_RETRIES: int = 2
 
 
 def _reflect(
@@ -279,7 +299,12 @@ def _reflect(
     user_facts_memory=None,
     session_id: str | None = None,
 ) -> dict:
-    messages = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=get_table_schema())}]
+    """Reflection step: present SQL results (or error) back to the LLM to decide next action.
+
+    Returns a parsed dict (same shape as ``_parse_response_from_msg``).
+    Falls back to a raw data dump if all LLM calls are rate-limited.
+    """
+    messages: list[dict] = [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT.format(schema=get_table_schema())}]
 
     if accumulated_context:
         messages.append({
@@ -304,7 +329,7 @@ def _reflect(
         })
     else:
         if results:
-            preview = json.dumps(results[:10], indent=2, default=str)
+            preview: str = json.dumps(results[:10], indent=2, default=str)
             if len(results) > 10:
                 preview += "\n..."
         else:
@@ -326,9 +351,9 @@ def _reflect(
             msg = chat(messages, tools=ALL_TOOLS)
         except Exception:
             if error:
-                fallback = f"I encountered a database error: {error}"
+                fallback: str = f"I encountered a database error: {error}"
             elif results:
-                lines = [", ".join(f"{k}={v}" for k, v in row.items()) for row in results[:5]]
+                lines: list[str] = [", ".join(f"{k}={v}" for k, v in row.items()) for row in results[:5]]
                 fallback = "\n".join(lines) if lines else "No results found."
             else:
                 fallback = "I was about to process that but hit a temporary issue. Try again?"
@@ -338,8 +363,8 @@ def _reflect(
 
 
 def _msg_raw(msg) -> str:
-    """Concatenate content + tool_calls for the raw trace."""
-    parts = []
+    """Concatenate message content and tool calls into a single raw trace string."""
+    parts: list[str] = []
     if msg.content:
         parts.append(msg.content.strip())
     if msg.tool_calls:
@@ -348,17 +373,29 @@ def _msg_raw(msg) -> str:
     return "\n".join(parts)
 
 
-def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=None, session_id: str | None = None) -> dict:
-    """Parse LLM response. Executes store_fact/delete_fact/search_memories
-    ops inline and returns only the first query_database or reply action."""
-    raw = _msg_raw(msg)
-    had_fact_ops = False
+def _parse_response_from_msg(
+    msg,
+    user_id: str | None = None,
+    user_facts_memory=None,
+    session_id: str | None = None,
+) -> dict:
+    """Parse the LLM's response message and execute side-effect tools inline.
+
+    - ``store_fact`` / ``delete_fact``: executed immediately, flags ``had_fact_ops``.
+    - ``search_memories``: executed immediately, returns search results.
+    - ``query_database``: extracted and returned as a tool action.
+    - If no ``tool_calls``, falls back to ``_parse_agent_response`` text parser.
+
+    Returns a dict with ``action``, ``tool_name``, ``content``, ``raw``, and optionally ``had_fact_ops`` / ``keyword``.
+    """
+    raw: str = _msg_raw(msg)
+    had_fact_ops: bool = False
     if msg.tool_calls:
         query_tc = None
         for tc in msg.tool_calls:
-            name = tc.function.name
+            name: str = tc.function.name
             try:
-                args = json.loads(tc.function.arguments)
+                args: dict = json.loads(tc.function.arguments)
             except (json.JSONDecodeError, TypeError):
                 continue
 
@@ -377,32 +414,33 @@ def _parse_response_from_msg(msg, user_id: str | None = None, user_facts_memory=
                     user_facts_memory.delete_fact(user_id, key)
                     had_fact_ops = True
             elif name == "search_memories" and session_id:
-                keyword = args.get("keyword", "")
+                keyword: str = args.get("keyword", "")
                 if keyword:
-                    results_text = session_log.search(session_id, keyword)
+                    results_text: str = session_log.search(session_id, keyword)
                     return {"action": "tool", "tool_name": "search_memories", "keyword": keyword, "content": results_text, "raw": raw, "had_fact_ops": had_fact_ops}
 
         if query_tc:
             try:
                 args = json.loads(query_tc.function.arguments)
-                sql = args.get("sql", "").rstrip(";")
+                sql: str = args.get("sql", "").rstrip(";")
                 if sql:
                     return {"action": "tool", "tool_name": "query_database", "content": sql, "raw": raw, "had_fact_ops": had_fact_ops}
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    content = (msg.content or "").strip()
+    content: str = (msg.content or "").strip()
     if content:
-        parsed = _parse_agent_response(content)
+        parsed: dict = _parse_agent_response(content)
         parsed["raw"] = raw
         return parsed
     return {"action": "reply", "content": "", "raw": raw, "had_fact_ops": had_fact_ops}
 
 
 def _build_audit_trail(all_sqls: list[str]) -> str:
+    """Format the list of SQL queries into a numbered markdown block."""
     if not all_sqls:
         return ""
-    parts = []
+    parts: list[str] = []
     for i, s in enumerate(all_sqls, 1):
         parts.append(f"  {i}. `{s}`")
     return "\n".join(parts)
@@ -416,8 +454,9 @@ def _build_messages(
     accumulated_context: str = "",
     user_id: str | None = None,
     user_facts_memory=None,
-) -> list:
-    messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT.format(schema=schema)}]
+) -> list[dict]:
+    """Build the message list for the LLM, including system context, memory, and the user question."""
+    messages: list[dict] = [{"role": "system", "content": AGENT_SYSTEM_PROMPT.format(schema=schema)}]
     if conversation_history:
         messages.append({"role": "system", "content": f"Recent conversation:\n{conversation_history}"})
     if long_term_context:
@@ -425,7 +464,7 @@ def _build_messages(
     if accumulated_context:
         messages.append({"role": "system", "content": f"Additional context:\n{accumulated_context}"})
     if user_id and user_facts_memory:
-        facts_str = user_facts_memory.format_facts(user_id)
+        facts_str: str = user_facts_memory.format_facts(user_id)
         if facts_str:
             messages.append({"role": "system", "content": facts_str})
     messages.append({"role": "user", "content": question})
@@ -440,20 +479,37 @@ def process_question(
     user_facts_memory=None,
     session_id: str | None = None,
 ) -> dict:
-    schema = get_table_schema()
-    messages = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory)
-    accumulated_context = ""
-    all_sqls = []
-    reflections = []
-    current_sql = ""
-    error_retries = 0
+    """Main ReAct loop: LLM decides tool, results reflected, repeat up to MAX_ITERATIONS.
+
+    Args:
+        question: The user's natural-language question.
+        long_term_context: Summaries from hierarchical memory, injected as system context.
+        conversation_history: Last 6 raw turns for short-term context.
+        user_id: Persistent user UUID (for facts and session scoping).
+        user_facts_memory: ``UserFactsMemory`` instance for store/delete operations.
+        session_id: Current session UUID (for ``search_memories``).
+
+    Returns:
+        Dict with keys:
+        - ``success`` (bool)
+        - ``sql`` (str): last SQL attempted
+        - ``answer`` (str): final natural-language answer (or error message)
+        - ``action`` (str): ``"reply"`` or ``"tool"``
+        - ``reflections`` (list[dict]): trace of all reflection steps
+    """
+    schema: str = get_table_schema()
+    messages: list[dict] = _build_messages(question, schema, long_term_context, conversation_history, "", user_id, user_facts_memory)
+    accumulated_context: str = ""
+    all_sqls: list[str] = []
+    reflections: list[dict] = []
+    current_sql: str = ""
+    error_retries: int = 0
 
     msg = chat(messages, tools=ALL_TOOLS)
-
-    parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
+    parsed: dict = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
 
     if parsed["action"] == "reply":
-        content = parsed.get("content", "")
+        content: str = parsed.get("content", "")
         if content:
             return {"success": True, "sql": "", "answer": content, "action": "reply"}
         if parsed.get("had_fact_ops"):
@@ -466,13 +522,13 @@ def process_question(
             return {"success": True, "sql": "", "answer": "I see. How can I help you?", "action": "reply"}
 
     for attempt in range(MAX_ITERATIONS):
-        tool_name = parsed.get("tool_name", "query_database")
+        tool_name: str = parsed.get("tool_name", "query_database")
 
         # --- store_fact (from reflection or error recovery) ---
         if tool_name == "store_fact":
-            key = parsed["content"]["key"]
-            value = parsed["content"]["value"]
-            stored = user_facts_memory.set_fact(user_id, key, value) if user_id and user_facts_memory else False
+            key: str = parsed["content"]["key"]
+            value: str = parsed["content"]["value"]
+            stored: bool = user_facts_memory.set_fact(user_id, key, value) if user_id and user_facts_memory else False
             accumulated_context += f"\n[Fact] stored '{key}' = '{value}'\n" if stored else f"\n[Fact] limit reached, '{key}' not stored\n"
             msg = chat(
                 [
@@ -492,7 +548,7 @@ def process_question(
         # --- delete_fact (from reflection or error recovery) ---
         if tool_name == "delete_fact":
             key = parsed["content"]["key"]
-            deleted = user_facts_memory.delete_fact(user_id, key) if user_id and user_facts_memory else False
+            deleted: bool = user_facts_memory.delete_fact(user_id, key) if user_id and user_facts_memory else False
             accumulated_context += f"\n[Fact] deleted '{key}'\n" if deleted else f"\n[Fact] '{key}' not found\n"
             msg = chat(
                 [
@@ -511,16 +567,16 @@ def process_question(
 
         # --- search_memories ---
         if tool_name == "search_memories":
-            keyword = parsed.get("keyword", "")
-            search_results = parsed["content"]
-            result_count = len([l for l in search_results.split("\n") if l.strip()])
+            keyword: str = parsed.get("keyword", "")
+            search_results: str = parsed["content"]
+            result_count: int = len([l for l in search_results.split("\n") if l.strip()])
             print(f"  [Search results] '{keyword}' — {result_count} line(s) found")
             accumulated_context += f"\n[Session search for '{keyword}']:\n{search_results}\n"
             messages = _build_messages(question, schema, long_term_context, conversation_history, accumulated_context, user_id, user_facts_memory)
             msg = chat(messages, tools=ALL_TOOLS)
             parsed = _parse_response_from_msg(msg, user_id=user_id, user_facts_memory=user_facts_memory, session_id=session_id)
             if parsed["action"] == "reply":
-                audit = _build_audit_trail(all_sqls)
+                audit: str = _build_audit_trail(all_sqls)
                 return {
                     "success": True, "sql": "", "answer": parsed["content"],
                     "action": "reply", "reflections": reflections,
@@ -535,6 +591,8 @@ def process_question(
                 "action": "tool", "reflections": reflections,
             }
 
+        is_safe: bool
+        reason: str
         is_safe, reason = validate_sql(current_sql)
         if not is_safe:
             return {
@@ -544,7 +602,7 @@ def process_question(
             }
 
         try:
-            results = execute_sql(current_sql)
+            results: list[dict] = execute_sql(current_sql)
         except Exception as e:
             error_retries += 1
             if error_retries > MAX_ERROR_RETRIES:
@@ -609,7 +667,7 @@ def process_question(
         preview = json.dumps(results[:5], indent=2, default=str) if results else "0 rows returned."
         if len(results) > 5:
             preview += "\n..."
-        step_label = f"[Step {len(all_sqls)}]"
+        step_label: str = f"[Step {len(all_sqls)}]"
         accumulated_context += f"{step_label}\nSQL: {current_sql}\nResults ({len(results)} rows):\n{preview}\n\n"
 
         current_sql = parsed["content"]

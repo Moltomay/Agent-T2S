@@ -1,3 +1,9 @@
+"""PostgreSQL connection management and schema introspection.
+
+Provides a shared engine, session factory, and utilities for executing
+raw SQL and fetching table schemas for the LLM.
+"""
+
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -5,7 +11,7 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = os.getenv(
+DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:poc_password@localhost:5432/agent_db",
 )
@@ -16,10 +22,22 @@ Base = declarative_base()
 
 
 def get_session():
+    """Return a new SQLAlchemy session bound to the shared engine."""
     return SessionLocal()
 
 
 def execute_sql(sql: str) -> list[dict]:
+    """Execute a raw SELECT statement and return rows as dicts.
+
+    Args:
+        sql: A valid PostgreSQL SELECT query.
+
+    Returns:
+        List of dicts mapping column names to values.
+
+    Raises:
+        Exception: Database errors (invalid SQL, connection issues, etc.).
+    """
     with engine.connect() as conn:
         result = conn.execute(text(sql))
         columns = result.keys()
@@ -27,6 +45,10 @@ def execute_sql(sql: str) -> list[dict]:
 
 
 def get_table_schema() -> str:
+    """Introspect the public schema and return a human-readable string for the LLM prompt.
+
+    Excludes internal tables (``agent_memory``, ``user_facts``).
+    """
     with engine.connect() as conn:
         result = conn.execute(
             text("""
@@ -41,7 +63,7 @@ def get_table_schema() -> str:
                 ORDER BY table_name, ordinal_position
             """)
         )
-        tables = {}
+        tables: dict[str, list[str]] = {}
         for row in result:
             table = row.table_name
             if table not in tables:
@@ -53,7 +75,7 @@ def get_table_schema() -> str:
             )
             tables[table].append(col_info)
 
-        schema_str = ""
+        schema_str: str = ""
         for tname, cols in tables.items():
             if tname in ("agent_memory", "user_facts"):
                 continue
