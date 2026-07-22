@@ -331,8 +331,8 @@ def _reflect(
         })
     else:
         if results:
-            preview: str = json.dumps(results[:10], indent=2, default=str)
-            if len(results) > 10:
+            preview: str = json.dumps(results[:30], indent=2, default=str)
+            if len(results) > 30:
                 preview += "\n..."
         else:
             preview = None
@@ -698,7 +698,7 @@ def process_question(
                 "action": "tool", "reflections": reflections,
             }
 
-        preview = json.dumps(results[:5], indent=2, default=str) if results else "0 rows returned."
+        preview = json.dumps(results[:30], indent=2, default=str) if results else "0 rows returned."
         if len(results) > 5:
             preview += "\n..."
         step_label: str = f"[Step {len(all_sqls)}]"
