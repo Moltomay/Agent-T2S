@@ -7,6 +7,7 @@ PMO user's accessible projects).
 """
 
 import os
+import uuid
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
@@ -74,13 +75,15 @@ def execute_sql(sql: str) -> list[dict]:
 def _quote_ids(ids: list) -> list[str]:
     """Quote a list of values for safe SQL injection.
 
-    Strings get single-quoted, numbers stay bare.
+    Strings (and UUID objects) get single-quoted, numbers stay bare.
     """
     out: list[str] = []
     for v in ids:
         if isinstance(v, str):
             escaped = v.replace("'", "''")
             out.append(f"'{escaped}'")
+        elif isinstance(v, uuid.UUID):
+            out.append(f"'{v}'")
         else:
             out.append(str(v))
     return out
