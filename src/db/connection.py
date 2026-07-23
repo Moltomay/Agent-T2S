@@ -31,6 +31,7 @@ SCOPED_BY_PROJECT: set[str] = {
     "projects_history", "milestones_history", "financial_metrics_history",
     "project_statuses_history", "project_team_assignments_history",
     "project_partners_history", "project_temporal_values_history",
+    "partners",
 }
 
 # Tables scoped by user_id (notifications for the current user only).
@@ -42,7 +43,7 @@ SCOPED_VIA_TEAM: set[str] = {"team_members", "users"}
 # Tables exposed as-is (shared reference data, no sensitive rows).
 REFERENCE_TABLES: set[str] = {
     "categories", "project_phases", "project_programs", "project_roles",
-    "project_status_types", "milestone_status_types", "partners", "user_roles",
+    "project_status_types", "milestone_status_types", "user_roles",
     "app_configs", "seed_history", "alembic_version",
 }
 
@@ -52,13 +53,36 @@ ALL_SCOPED: set[str] = SCOPED_BY_PROJECT | SCOPED_BY_USER | SCOPED_VIA_TEAM
 SENSITIVE_COLUMNS: dict[str, set[str]] = {
     "users": {"phone", "password_hash", "password_reset_token", "password_reset_expires"},
     "team_members": {"phone"},
-    "partners": {"address"},
+    "partners": {"address", "phone"},
 }
 
 
 def _is_sensitive(table: str, column: str) -> bool:
     """Check if a column is marked as sensitive and should be hidden from the LLM."""
     return column in SENSITIVE_COLUMNS.get(table, set())
+
+
+def _safe_columns(table: str, alias: str | None = None) -> str:
+    """Return comma-separated list of non-sensitive columns for a table.
+
+    Used by ``build_ctes`` to avoid ``SELECT *`` on tables with
+    column-level grants that would be rejected by PostgreSQL.
+
+    Args:
+        table: Physical table name (e.g. ``"users"``).
+        alias: Optional table alias to prefix each column (e.g. ``"u"``
+            produces ``"u.id, u.email, …"``).
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT column_name FROM information_schema.columns "
+                 "WHERE table_name = :t AND table_schema = 'public' "
+                 "ORDER BY ordinal_position"),
+            {"t": table},
+        )
+        safe = [r[0] for r in rows if r[0] not in SENSITIVE_COLUMNS.get(table, set())]
+    prefix = f"{alias}." if alias else ""
+    return ", ".join(f"{prefix}{c}" for c in safe)
 
 
 def get_session():
@@ -130,6 +154,7 @@ def build_ctes(project_ids: list, user_id: str) -> str:
         f"scoped_project_statuses AS (SELECT ps.* FROM project_statuses ps INNER JOIN scoped_projects p ON ps.project_id = p.id)",
         f"scoped_project_team_assignments AS (SELECT a.* FROM project_team_assignments a INNER JOIN scoped_projects p ON a.project_id = p.id AND a.is_deleted = false)",
         f"scoped_project_partners AS (SELECT pp.* FROM project_partners pp INNER JOIN scoped_projects p ON pp.project_id = p.id)",
+        f"scoped_partners AS (SELECT {_safe_columns('partners', 'p')} FROM partners p INNER JOIN scoped_project_partners spp ON p.id = spp.partner_id)",
         f"scoped_project_temporal_values AS (SELECT t.* FROM project_temporal_values t INNER JOIN scoped_projects p ON t.project_id = p.id)",
         # ── History tables (scoped by the same project IDs) ────────────
         f"scoped_projects_history AS (SELECT * FROM projects_history WHERE {project_filter})",
@@ -140,8 +165,8 @@ def build_ctes(project_ids: list, user_id: str) -> str:
         f"scoped_project_partners_history AS (SELECT pph.* FROM project_partners_history pph INNER JOIN scoped_projects p ON pph.project_id = p.id)",
         f"scoped_project_temporal_values_history AS (SELECT th.* FROM project_temporal_values_history th INNER JOIN scoped_projects p ON th.project_id = p.id)",
         # ── Team / user scoped (via project_team_assignments) ───────────
-        f"scoped_team_members AS (SELECT DISTINCT tm.* FROM team_members tm INNER JOIN scoped_project_team_assignments a ON tm.id = a.team_member_id)",
-        f"scoped_users AS (SELECT DISTINCT u.* FROM users u INNER JOIN scoped_team_members tm ON u.id = tm.user_id)",
+        f"scoped_team_members AS (SELECT DISTINCT {_safe_columns('team_members', 'tm')} FROM team_members tm INNER JOIN scoped_project_team_assignments a ON tm.id = a.team_member_id)",
+        f"scoped_users AS (SELECT DISTINCT {_safe_columns('users', 'u')} FROM users u INNER JOIN scoped_team_members tm ON u.id = tm.user_id)",
         # ── User-scoped ────────────────────────────────────────────────
         f"scoped_notifications AS (SELECT * FROM notifications WHERE user_id = {uid} AND is_deleted = false)",
         f"scoped_notification_preferences AS (SELECT * FROM notification_preferences WHERE user_id = {uid})",
