@@ -179,7 +179,7 @@ def validate_scoped_tables(sql: str, raw_tables: set[str]) -> tuple[bool, str]:
     no_strings: str = re.sub(r"'[^']*'", "", cleaned)
     for table in raw_tables:
         if re.search(rf'(?<!\w){re.escape(table)}(?!\w)', no_strings, re.IGNORECASE):
-            return False, f"Table '{table}' is not accessible. Use 'scoped_{table}' instead."
+            return False, "Raw table references are not allowed. Use scoped_* tables only."
     return True, ""
 
 
