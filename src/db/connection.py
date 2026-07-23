@@ -154,7 +154,7 @@ def build_ctes(project_ids: list, user_id: str) -> str:
         f"scoped_project_statuses AS (SELECT ps.* FROM project_statuses ps INNER JOIN scoped_projects p ON ps.project_id = p.id)",
         f"scoped_project_team_assignments AS (SELECT a.* FROM project_team_assignments a INNER JOIN scoped_projects p ON a.project_id = p.id AND a.is_deleted = false)",
         f"scoped_project_partners AS (SELECT pp.* FROM project_partners pp INNER JOIN scoped_projects p ON pp.project_id = p.id)",
-        f"scoped_partners AS (SELECT {_safe_columns('partners', 'p')} FROM partners p INNER JOIN scoped_project_partners spp ON p.id = spp.partner_id)",
+        f"scoped_partners AS (SELECT DISTINCT {_safe_columns('partners', 'p')} FROM partners p INNER JOIN scoped_project_partners spp ON p.id = spp.partner_id)",
         f"scoped_project_temporal_values AS (SELECT t.* FROM project_temporal_values t INNER JOIN scoped_projects p ON t.project_id = p.id)",
         # ── History tables (scoped by the same project IDs) ────────────
         f"scoped_projects_history AS (SELECT * FROM projects_history WHERE {project_filter})",
