@@ -48,6 +48,18 @@ REFERENCE_TABLES: set[str] = {
 
 ALL_SCOPED: set[str] = SCOPED_BY_PROJECT | SCOPED_BY_USER | SCOPED_VIA_TEAM
 
+# Columns stripped from the LLM-visible schema (data privacy).
+SENSITIVE_COLUMNS: dict[str, set[str]] = {
+    "users": {"phone", "password_hash", "password_reset_token", "password_reset_expires"},
+    "team_members": {"phone"},
+    "partners": {"address"},
+}
+
+
+def _is_sensitive(table: str, column: str) -> bool:
+    """Check if a column is marked as sensitive and should be hidden from the LLM."""
+    return column in SENSITIVE_COLUMNS.get(table, set())
+
 
 def get_session():
     """Return a new SQLAlchemy session bound to the shared engine."""
@@ -158,10 +170,13 @@ def _format_rows_to_schema(rows: list[dict]) -> str:
     tables: dict[str, list[str]] = {}
     for row in rows:
         tname: str = row["table_name"]
+        cname: str = row["column_name"]
+        if _is_sensitive(tname, cname):
+            continue
         if tname not in tables:
             tables[tname] = []
         col_info = (
-            f"  - {row['column_name']} ({row['data_type']}"
+            f"  - {cname} ({row['data_type']}"
             f"{', nullable' if row['is_nullable'] == 'YES' else ', not null'}"
             f"{f', default={row['column_default']}' if row['column_default'] else ''})"
         )
