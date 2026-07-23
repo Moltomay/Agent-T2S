@@ -142,8 +142,11 @@ def validate_sql(sql: str) -> tuple[bool, str]:
 
     first: str = upper_sql.split()[0] if upper_sql.split() else ""
 
-    if first != "SELECT":
+    if first not in ("SELECT", "WITH"):
         return False, f"Only SELECT queries are allowed. Got '{first}'."
+
+    if first == "WITH" and "SELECT" not in upper_sql:
+        return False, "WITH query must contain a SELECT statement."
 
     for token in DANGEROUS_AFTER_SELECT:
         if re.search(rf'(?<!\w){token}(?!\w)', upper_sql):
